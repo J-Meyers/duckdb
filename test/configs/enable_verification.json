@@ -212,6 +212,12 @@
         "test/sql/storage/compression/test_using_compression.test",
         "test/sql/error/error_position.test"
       ]
+    },
+    {
+      "reason": "Serialization Error: Unsupported type for deserialization of AlterInfo!",
+      "paths": [
+        "test/sql/alter/test_alter_database_rename.test"
+      ]
     }
   ]
 }
