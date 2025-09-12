@@ -672,6 +672,7 @@ struct ColumnAggState {
 	GeometryKindSet geo_types;
 	idx_t rg_with_minmax = 0;
 	bool bbox_disabled = false;
+	bool geo_types_all_null = true;
 };
 
 class ParquetColumnMetadataProcessor : public ParquetMetadataFileProcessor {
@@ -940,6 +941,7 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 				for (auto &t : col_meta.geospatial_statistics.geospatial_types) {
 					agg.geo_types.Add(t);
 				}
+				agg.geo_types_all_null = false;
 			}
 		}
 	}
@@ -1003,12 +1005,15 @@ void ParquetColumnMetadataProcessor::ReadRow(DataChunk &output, idx_t output_idx
 	                                                                       : Value(LogicalTypeId::DOUBLE)},
 	                }));
 	// geo_types
+	if (!agg.geo_types_all_null)
 	{
 		vector<Value> types_list;
 		for (auto &name : agg.geo_types.ToString(true)) {
 			types_list.emplace_back(Value(name));
 		}
 		output.SetValue(14, output_idx, Value::LIST(LogicalType::VARCHAR, types_list));
+	} else {
+		output.SetValue(14, output_idx, Value());
 	}
 	// stats_coverage
 	double coverage = 0.0;
