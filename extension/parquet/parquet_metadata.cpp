@@ -670,7 +670,6 @@ struct ColumnAggState {
 	bool bloom_present_any = false;
 	GeoBBoxAgg bbox;
 	GeometryKindSet geo_types;
-	idx_t rg_with_minmax = 0;
 	bool bbox_disabled = false;
 	bool geo_types_all_null = true;
 };
@@ -747,9 +746,6 @@ void ParquetMetaDataOperator::BindSchema<ParquetMetadataOperatorType::COLUMN_MET
 
 	names.emplace_back("geo_types");
 	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
-
-	names.emplace_back("stats_coverage");
-	return_types.emplace_back(LogicalType::DOUBLE);
 
 	names.emplace_back("file_num_rows");
 	return_types.emplace_back(LogicalType::BIGINT);
@@ -853,21 +849,47 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 	file_size_bytes = reader->GetHandle().GetFileSize();
 	footer_size = reader->metadata->footer_size;
 
-	// aggregate across row groups
-	for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
-		auto &rg = meta->row_groups[rg_idx];
-		for (idx_t col_idx = 0; col_idx < column_schemas.size(); col_idx++) {
+	// Column-oriented processing
+	for (idx_t col_idx = 0; col_idx < column_schemas.size(); col_idx++) {
+		auto &agg = aggs[col_idx];
+
+		// total_compressed_size and total_uncompressed_size
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+
+			agg.total_compressed_size += col_meta.total_compressed_size;
+			agg.total_uncompressed_size += col_meta.total_uncompressed_size;
+		}
+
+		// values_total
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+
+			agg.values_total += col_meta.num_values;
+		}
+
+		// bloom_present_any
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+
+			if (!agg.bloom_present_any && col_meta.__isset.bloom_filter_length && col_meta.bloom_filter_length > 0) {
+				agg.bloom_present_any = true;
+				break;
+			}
+		}
+
+		// null_count_total
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
 			auto &col_chunk = rg.columns[col_idx];
 			auto &col_meta = col_chunk.meta_data;
 			auto &stats = col_meta.statistics;
-			auto &agg = aggs[col_idx];
-
-			agg.values_total += col_meta.num_values;
-			agg.total_compressed_size += col_meta.total_compressed_size;
-			agg.total_uncompressed_size += col_meta.total_uncompressed_size;
-			if (!agg.bloom_present_any && col_meta.__isset.bloom_filter_length && col_meta.bloom_filter_length > 0) {
-				agg.bloom_present_any = true;
-			}
 
 			if (stats.__isset.null_count) {
 				if (agg.null_count_total_known) {
@@ -875,15 +897,23 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 				}
 			} else {
 				agg.null_count_total_known = false;
+				break;
 			}
+		}
 
-			// min/max: process sides independently; short-circuit each side once missing
+		// min combined with min_is_exact_all
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+			auto &stats = col_meta.statistics;
+
 			const bool have_min = stats.__isset.min_value || stats.__isset.min;
-			const bool have_max = stats.__isset.max_value || stats.__isset.max;
 			if ((rg_idx == 0) || !agg.min_value.IsNull()) {
 				if (!have_min) {
 					agg.min_value = Value();
 					agg.min_is_exact_all = false;
+					break; // No need to continue, min is null
 				} else {
 					const auto &schema_ele = agg.schema;
 					const auto &lt = agg.type;
@@ -891,12 +921,15 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 					min_v = stats.__isset.min_value
 					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min_value)
 					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min);
-					if (rg_idx == 0 || agg.min_value.IsNull()) {
+					if (agg.min_value.IsNull()) {
 						agg.min_value = min_v;
-					} else {
-						if (ValueOperations::LessThan(min_v, agg.min_value)) {
-							agg.min_value = min_v;
-						}
+						agg.min_is_exact_all = false;
+						break; // No need to continue, min is null
+					}
+					if (rg_idx == 0) {
+						agg.min_value = min_v;
+					} else if (ValueOperations::LessThan(min_v, agg.min_value)) {
+						agg.min_value = min_v;
 					}
 
 					if (!(stats.__isset.is_min_value_exact && stats.is_min_value_exact)) {
@@ -904,39 +937,62 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 					}
 				}
 			}
-			if ((rg_idx == 0) || !agg.max_value.IsNull()) {
-				if (!have_max) {
-					agg.max_value = Value();
-					agg.max_is_exact_all = false;
-				} else {
-					const auto &schema_ele = agg.schema;
-					const auto &lt = agg.type;
-					Value max_v;
-					max_v = stats.__isset.max_value
-					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
-					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
-					if (rg_idx == 0 || agg.max_value.IsNull()) {
-						agg.max_value = max_v;
-					} else {
-						if (ValueOperations::LessThan(agg.max_value, max_v)) {
-							agg.max_value = max_v;
-						}
-					}
+		}
 
-					if (!(stats.__isset.is_max_value_exact && stats.is_max_value_exact)) {
-						agg.max_is_exact_all = false;
-					}
+		// max combined with max_is_exact_all
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+			auto &stats = col_meta.statistics;
+
+			const bool have_max = stats.__isset.max_value || stats.__isset.max;
+			if (!have_max) {
+				agg.max_value = Value();
+				agg.max_is_exact_all = false;
+				break; // No need to continue, max is null
+			} else {
+				const auto &schema_ele = agg.schema;
+				const auto &lt = agg.type;
+				Value max_v;
+				max_v = stats.__isset.max_value ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
+				                                : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
+				if (agg.max_value.IsNull()) {
+					agg.max_value = max_v;
+					agg.max_is_exact_all = false;
+					break; // No need to continue, max is null
+				}
+				if (rg_idx == 0) {
+					agg.max_value = max_v;
+				} else if (ValueOperations::GreaterThan(max_v, agg.max_value)) {
+					agg.max_value = max_v;
+				}
+
+				if (!(stats.__isset.is_max_value_exact && stats.is_max_value_exact)) {
+					agg.max_is_exact_all = false;
 				}
 			}
+		}
 
-			if (have_min && have_max) {
-				agg.rg_with_minmax++;
-			}
+		// bbox
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
 
-			agg.bbox_disabled = agg.bbox_disabled || !col_meta.geospatial_statistics.__isset.bbox;
-			if (!agg.bbox_disabled) {
-				MergeBBox(agg.bbox, col_meta.geospatial_statistics.bbox, rg_idx == 0);
+			agg.bbox_disabled = !col_meta.geospatial_statistics.__isset.bbox;
+			if (agg.bbox_disabled) {
+				break;
 			}
+			MergeBBox(agg.bbox, col_meta.geospatial_statistics.bbox, rg_idx == 0);
+		}
+
+		// geo_types combined with geo_types_all_null
+		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+			auto &rg = meta->row_groups[rg_idx];
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+
 			if (col_meta.geospatial_statistics.__isset.geospatial_types) {
 				for (auto &t : col_meta.geospatial_statistics.geospatial_types) {
 					agg.geo_types.Add(t);
@@ -1005,8 +1061,7 @@ void ParquetColumnMetadataProcessor::ReadRow(DataChunk &output, idx_t output_idx
 	                                                                       : Value(LogicalTypeId::DOUBLE)},
 	                }));
 	// geo_types
-	if (!agg.geo_types_all_null)
-	{
+	if (!agg.geo_types_all_null) {
 		vector<Value> types_list;
 		for (auto &name : agg.geo_types.ToString(true)) {
 			types_list.emplace_back(Value(name));
@@ -1015,17 +1070,11 @@ void ParquetColumnMetadataProcessor::ReadRow(DataChunk &output, idx_t output_idx
 	} else {
 		output.SetValue(14, output_idx, Value());
 	}
-	// stats_coverage
-	double coverage = 0.0;
-	if (file_num_row_groups > 0) {
-		coverage = static_cast<double>(agg.rg_with_minmax) / static_cast<double>(file_num_row_groups);
-	}
-	output.SetValue(15, output_idx, Value::DOUBLE(coverage));
 	// file totals duplicated
-	output.SetValue(16, output_idx, Value::BIGINT(file_num_rows));
-	output.SetValue(17, output_idx, Value::BIGINT(file_num_row_groups));
-	output.SetValue(18, output_idx, Value::UBIGINT(file_size_bytes));
-	output.SetValue(19, output_idx, Value::UBIGINT(footer_size));
+	output.SetValue(15, output_idx, Value::BIGINT(file_num_rows));
+	output.SetValue(16, output_idx, Value::BIGINT(file_num_row_groups));
+	output.SetValue(17, output_idx, Value::UBIGINT(file_size_bytes));
+	output.SetValue(18, output_idx, Value::UBIGINT(footer_size));
 }
 
 //===--------------------------------------------------------------------===//
