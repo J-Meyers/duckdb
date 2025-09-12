@@ -11,6 +11,7 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "parquet_reader.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/value_operations/value_operations.hpp"
 
 namespace duckdb {
 
@@ -46,7 +47,8 @@ enum class ParquetMetadataOperatorType : uint8_t {
 	SCHEMA,
 	KEY_VALUE_META_DATA,
 	FILE_META_DATA,
-	BLOOM_PROBE
+	BLOOM_PROBE,
+	COLUMN_META_DATA
 };
 
 class ParquetMetadataFileProcessor {
@@ -645,6 +647,383 @@ void ParquetKeyValueMetadataProcessor::ReadRow(DataChunk &output, idx_t output_i
 }
 
 //===--------------------------------------------------------------------===//
+// Column (File-Aggregated) Meta Data
+//===--------------------------------------------------------------------===//
+
+struct GeoBBoxAgg {
+	bool has_zmin = false, has_zmax = false, has_mmin = false, has_mmax = false;
+	double xmin = 0, xmax = 0, ymin = 0, ymax = 0, zmin = 0, zmax = 0, mmin = 0, mmax = 0;
+};
+
+struct ColumnAggState {
+	ParquetColumnSchema schema;
+	LogicalType type;
+	idx_t values_total = 0;
+	idx_t null_count_total = 0;
+	bool null_count_total_known = true;
+	bool min_is_exact_all = true;
+	bool max_is_exact_all = true;
+	Value min_value;
+	Value max_value;
+	idx_t total_compressed_size = 0;
+	idx_t total_uncompressed_size = 0;
+	bool bloom_present_any = false;
+	GeoBBoxAgg bbox;
+	GeometryKindSet geo_types;
+	idx_t rg_with_minmax = 0;
+	bool bbox_disabled = false;
+};
+
+class ParquetColumnMetadataProcessor : public ParquetMetadataFileProcessor {
+public:
+	void InitializeInternal(ClientContext &context) override;
+	idx_t TotalRowCount() override;
+	void ReadRow(DataChunk &output, idx_t output_idx, idx_t row_idx) override;
+
+private:
+	vector<ParquetColumnSchema> column_schemas;
+	vector<ColumnAggState> aggs;
+	// file-level fields duplicated per row
+	int64_t file_num_rows = 0;
+	int64_t file_num_row_groups = 0;
+	uint64_t file_size_bytes = 0;
+	uint64_t footer_size = 0;
+};
+
+template <>
+void ParquetMetaDataOperator::BindSchema<ParquetMetadataOperatorType::COLUMN_META_DATA>(
+    vector<LogicalType> &return_types, vector<string> &names) {
+	names.emplace_back("file_name");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("column_id");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("path_in_schema");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("type");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("values_total");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("null_count_total");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("min_value");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("max_value");
+	return_types.emplace_back(LogicalType::VARCHAR);
+
+	names.emplace_back("min_is_exact");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+
+	names.emplace_back("max_is_exact");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+
+	names.emplace_back("total_compressed_size");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("total_uncompressed_size");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("bloom_filter_present");
+	return_types.emplace_back(LogicalType::BOOLEAN);
+
+	names.emplace_back("geo_bbox");
+	return_types.emplace_back(LogicalType::STRUCT({
+	    {"xmin", LogicalType::DOUBLE},
+	    {"xmax", LogicalType::DOUBLE},
+	    {"ymin", LogicalType::DOUBLE},
+	    {"ymax", LogicalType::DOUBLE},
+	    {"zmin", LogicalType::DOUBLE},
+	    {"zmax", LogicalType::DOUBLE},
+	    {"mmin", LogicalType::DOUBLE},
+	    {"mmax", LogicalType::DOUBLE},
+	}));
+
+	names.emplace_back("geo_types");
+	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
+
+	names.emplace_back("stats_coverage");
+	return_types.emplace_back(LogicalType::DOUBLE);
+
+	names.emplace_back("file_num_rows");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("file_num_row_groups");
+	return_types.emplace_back(LogicalType::BIGINT);
+
+	names.emplace_back("file_size_bytes");
+	return_types.emplace_back(LogicalType::UBIGINT);
+
+	names.emplace_back("footer_size");
+	return_types.emplace_back(LogicalType::UBIGINT);
+}
+
+static inline void MergeBBox(GeoBBoxAgg &agg_bbox, const duckdb_parquet::BoundingBox &bbox, bool first_rg) {
+	if (first_rg) {
+		agg_bbox.xmin = bbox.xmin;
+		agg_bbox.xmax = bbox.xmax;
+		agg_bbox.ymin = bbox.ymin;
+		agg_bbox.ymax = bbox.ymax;
+		if (bbox.__isset.zmin) {
+			agg_bbox.zmin = bbox.zmin;
+			agg_bbox.has_zmin = true;
+		}
+		if (bbox.__isset.zmax) {
+			agg_bbox.zmax = bbox.zmax;
+			agg_bbox.has_zmax = true;
+		}
+		if (bbox.__isset.mmin) {
+			agg_bbox.mmin = bbox.mmin;
+			agg_bbox.has_mmin = true;
+		}
+		if (bbox.__isset.mmax) {
+			agg_bbox.mmax = bbox.mmax;
+			agg_bbox.has_mmax = true;
+		}
+	} else {
+		agg_bbox.xmin = MinValue(agg_bbox.xmin, bbox.xmin);
+		agg_bbox.xmax = MaxValue(agg_bbox.xmax, bbox.xmax);
+		agg_bbox.ymin = MinValue(agg_bbox.ymin, bbox.ymin);
+		agg_bbox.ymax = MaxValue(agg_bbox.ymax, bbox.ymax);
+
+		if (agg_bbox.has_zmin) {
+			if (!bbox.__isset.zmin) {
+				agg_bbox.has_zmin = false;
+			} else {
+				agg_bbox.zmin = MinValue(agg_bbox.zmin, bbox.zmin);
+			}
+		}
+		if (agg_bbox.has_zmax) {
+			if (!bbox.__isset.zmax) {
+				agg_bbox.has_zmax = false;
+			} else {
+				agg_bbox.zmax = MaxValue(agg_bbox.zmax, bbox.zmax);
+			}
+		}
+		if (agg_bbox.has_mmin) {
+			if (!bbox.__isset.mmin) {
+				agg_bbox.has_mmin = false;
+			} else {
+				agg_bbox.mmin = MinValue(agg_bbox.mmin, bbox.mmin);
+			}
+		}
+		if (agg_bbox.has_mmax) {
+			if (!bbox.__isset.mmax) {
+				agg_bbox.has_mmax = false;
+			} else {
+				agg_bbox.mmax = MaxValue(agg_bbox.mmax, bbox.mmax);
+			}
+		}
+	}
+}
+
+void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) {
+	auto meta = reader->GetFileMetadata();
+	column_schemas.clear();
+	for (idx_t schema_idx = 0; schema_idx < meta->schema.size(); schema_idx++) {
+		auto &schema_element = meta->schema[schema_idx];
+		if (schema_element.num_children > 0) {
+			continue;
+		}
+		ParquetColumnSchema col_schema;
+		col_schema.type = reader->DeriveLogicalType(schema_element, col_schema);
+		column_schemas.push_back(col_schema);
+	}
+
+	aggs.clear();
+	aggs.resize(column_schemas.size());
+	for (idx_t i = 0; i < column_schemas.size(); i++) {
+		aggs[i].schema = column_schemas[i];
+		aggs[i].type = column_schemas[i].type;
+		aggs[i].null_count_total = idx_t(0);
+		aggs[i].null_count_total_known = true;
+		aggs[i].min_value = Value();
+		aggs[i].max_value = Value();
+	}
+
+	// file-level
+	file_num_rows = NumericCast<int64_t>(meta->num_rows);
+	file_num_row_groups = NumericCast<int64_t>(meta->row_groups.size());
+	file_size_bytes = reader->GetHandle().GetFileSize();
+	footer_size = reader->metadata->footer_size;
+
+	// aggregate across row groups
+	for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+		auto &rg = meta->row_groups[rg_idx];
+		for (idx_t col_idx = 0; col_idx < column_schemas.size(); col_idx++) {
+			auto &col_chunk = rg.columns[col_idx];
+			auto &col_meta = col_chunk.meta_data;
+			auto &stats = col_meta.statistics;
+			auto &agg = aggs[col_idx];
+
+			agg.values_total += col_meta.num_values;
+			agg.total_compressed_size += col_meta.total_compressed_size;
+			agg.total_uncompressed_size += col_meta.total_uncompressed_size;
+			if (!agg.bloom_present_any && col_meta.__isset.bloom_filter_length && col_meta.bloom_filter_length > 0) {
+				agg.bloom_present_any = true;
+			}
+
+			if (stats.__isset.null_count) {
+				if (agg.null_count_total_known) {
+					agg.null_count_total = agg.null_count_total + NumericCast<idx_t>(stats.null_count);
+				}
+			} else {
+				agg.null_count_total_known = false;
+			}
+
+			// min/max: process sides independently; short-circuit each side once missing
+			const bool have_min = stats.__isset.min_value || stats.__isset.min;
+			const bool have_max = stats.__isset.max_value || stats.__isset.max;
+			if ((rg_idx == 0) || !agg.min_value.IsNull()) {
+				if (!have_min) {
+					agg.min_value = Value();
+					agg.min_is_exact_all = false;
+				} else {
+					const auto &schema_ele = agg.schema;
+					const auto &lt = agg.type;
+					Value min_v;
+					min_v = stats.__isset.min_value
+					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min_value)
+					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min);
+					if (rg_idx == 0 || agg.min_value.IsNull()) {
+						agg.min_value = min_v;
+					} else {
+						if (ValueOperations::LessThan(min_v, agg.min_value)) {
+							agg.min_value = min_v;
+						}
+					}
+
+					if (!(stats.__isset.is_min_value_exact && stats.is_min_value_exact)) {
+						agg.min_is_exact_all = false;
+					}
+				}
+			}
+			if ((rg_idx == 0) || !agg.max_value.IsNull()) {
+				if (!have_max) {
+					agg.max_value = Value();
+					agg.max_is_exact_all = false;
+				} else {
+					const auto &schema_ele = agg.schema;
+					const auto &lt = agg.type;
+					Value max_v;
+					max_v = stats.__isset.max_value
+					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
+					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
+					if (rg_idx == 0 || agg.max_value.IsNull()) {
+						agg.max_value = max_v;
+					} else {
+						if (ValueOperations::LessThan(agg.max_value, max_v)) {
+							agg.max_value = max_v;
+						}
+					}
+
+					if (!(stats.__isset.is_max_value_exact && stats.is_max_value_exact)) {
+						agg.max_is_exact_all = false;
+					}
+				}
+			}
+
+			if (have_min && have_max) {
+				agg.rg_with_minmax++;
+			}
+
+			agg.bbox_disabled = agg.bbox_disabled || !col_meta.geospatial_statistics.__isset.bbox;
+			if (!agg.bbox_disabled) {
+				MergeBBox(agg.bbox, col_meta.geospatial_statistics.bbox, rg_idx == 0);
+			}
+			if (col_meta.geospatial_statistics.__isset.geospatial_types) {
+				for (auto &t : col_meta.geospatial_statistics.geospatial_types) {
+					agg.geo_types.Add(t);
+				}
+			}
+		}
+	}
+}
+
+idx_t ParquetColumnMetadataProcessor::TotalRowCount() {
+	return aggs.size();
+}
+
+void ParquetColumnMetadataProcessor::ReadRow(DataChunk &output, idx_t output_idx, idx_t row_idx) {
+	const auto &agg = aggs[row_idx];
+
+	// file_name
+	output.SetValue(0, output_idx, reader->file.path);
+	// column_id
+	output.SetValue(1, output_idx, Value::BIGINT(NumericCast<int64_t>(row_idx)));
+	// path_in_schema (need to retrieve from a representative column chunk's meta)
+	// We don't have direct path here; reconstruct from first row group if present
+	auto meta = reader->GetFileMetadata();
+	string path;
+	if (!meta->row_groups.empty() && !meta->row_groups[0].columns.empty()) {
+		auto &first_col_meta = meta->row_groups[0].columns[row_idx].meta_data;
+		path = StringUtil::Join(first_col_meta.path_in_schema, ", ");
+	}
+	output.SetValue(2, output_idx, Value(path));
+	// type
+	output.SetValue(3, output_idx, agg.type.ToString());
+	// values_total
+	output.SetValue(4, output_idx, Value::BIGINT(NumericCast<int64_t>(agg.values_total)));
+	// null_count_total
+	output.SetValue(5, output_idx,
+	                agg.null_count_total_known ? Value::BIGINT(NumericCast<int64_t>(agg.null_count_total)) : Value());
+	// min_value
+	output.SetValue(6, output_idx, agg.min_value.DefaultCastAs(LogicalType::VARCHAR));
+	// max_value
+	output.SetValue(7, output_idx, agg.max_value.DefaultCastAs(LogicalType::VARCHAR));
+	// min_is_exact
+	output.SetValue(8, output_idx, Value::BOOLEAN(agg.min_is_exact_all));
+	// max_is_exact
+	output.SetValue(9, output_idx, Value::BOOLEAN(agg.max_is_exact_all));
+	// total_compressed_size
+	output.SetValue(10, output_idx, Value::BIGINT(NumericCast<int64_t>(agg.total_compressed_size)));
+	// total_uncompressed_size
+	output.SetValue(11, output_idx, Value::BIGINT(NumericCast<int64_t>(agg.total_uncompressed_size)));
+	// bloom_filter_present
+	output.SetValue(12, output_idx, Value::BOOLEAN(agg.bloom_present_any));
+	// geo_bbox
+	output.SetValue(13, output_idx,
+	                Value::STRUCT({
+	                    {"xmin", !agg.bbox_disabled ? Value::DOUBLE(agg.bbox.xmin) : Value(LogicalTypeId::DOUBLE)},
+	                    {"xmax", !agg.bbox_disabled ? Value::DOUBLE(agg.bbox.xmax) : Value(LogicalTypeId::DOUBLE)},
+	                    {"ymin", !agg.bbox_disabled ? Value::DOUBLE(agg.bbox.ymin) : Value(LogicalTypeId::DOUBLE)},
+	                    {"ymax", !agg.bbox_disabled ? Value::DOUBLE(agg.bbox.ymax) : Value(LogicalTypeId::DOUBLE)},
+	                    {"zmin", (!agg.bbox_disabled && agg.bbox.has_zmin) ? Value::DOUBLE(agg.bbox.zmin)
+	                                                                       : Value(LogicalTypeId::DOUBLE)},
+	                    {"zmax", (!agg.bbox_disabled && agg.bbox.has_zmax) ? Value::DOUBLE(agg.bbox.zmax)
+	                                                                       : Value(LogicalTypeId::DOUBLE)},
+	                    {"mmin", (!agg.bbox_disabled && agg.bbox.has_mmin) ? Value::DOUBLE(agg.bbox.mmin)
+	                                                                       : Value(LogicalTypeId::DOUBLE)},
+	                    {"mmax", (!agg.bbox_disabled && agg.bbox.has_mmax) ? Value::DOUBLE(agg.bbox.mmax)
+	                                                                       : Value(LogicalTypeId::DOUBLE)},
+	                }));
+	// geo_types
+	{
+		vector<Value> types_list;
+		for (auto &name : agg.geo_types.ToString(true)) {
+			types_list.emplace_back(Value(name));
+		}
+		output.SetValue(14, output_idx, Value::LIST(LogicalType::VARCHAR, types_list));
+	}
+	// stats_coverage
+	double coverage = 0.0;
+	if (file_num_row_groups > 0) {
+		coverage = static_cast<double>(agg.rg_with_minmax) / static_cast<double>(file_num_row_groups);
+	}
+	output.SetValue(15, output_idx, Value::DOUBLE(coverage));
+	// file totals duplicated
+	output.SetValue(16, output_idx, Value::BIGINT(file_num_rows));
+	output.SetValue(17, output_idx, Value::BIGINT(file_num_row_groups));
+	output.SetValue(18, output_idx, Value::UBIGINT(file_size_bytes));
+	output.SetValue(19, output_idx, Value::UBIGINT(footer_size));
+}
+
+//===--------------------------------------------------------------------===//
 // File Meta Data
 //===--------------------------------------------------------------------===//
 
@@ -859,6 +1238,10 @@ unique_ptr<LocalTableFunctionState> ParquetMetaDataOperator::InitLocal(Execution
 		    make_uniq<ParquetBloomProbeProcessor>(probe_bind_data.probe_column_name, probe_bind_data.probe_constant);
 		break;
 	}
+	case ParquetMetadataOperatorType::COLUMN_META_DATA: {
+		res->processor = make_uniq<ParquetColumnMetadataProcessor>();
+		break;
+	}
 	default:
 		throw InternalException("Unsupported ParquetMetadataOperatorType");
 	}
@@ -955,6 +1338,15 @@ ParquetBloomProbeFunction::ParquetBloomProbeFunction()
                     ParquetMetaDataOperator::Bind<ParquetMetadataOperatorType::BLOOM_PROBE>,
                     ParquetMetaDataOperator::InitGlobal,
                     ParquetMetaDataOperator::InitLocal<ParquetMetadataOperatorType::BLOOM_PROBE>) {
+	table_scan_progress = ParquetMetaDataOperator::Progress;
+}
+
+ParquetColumnMetadataFunction::ParquetColumnMetadataFunction()
+    : TableFunction("parquet_column_metadata", {LogicalType::VARCHAR},
+                    ParquetMetaDataOperator::Function<ParquetMetadataOperatorType::COLUMN_META_DATA>,
+                    ParquetMetaDataOperator::Bind<ParquetMetadataOperatorType::COLUMN_META_DATA>,
+                    ParquetMetaDataOperator::InitGlobal,
+                    ParquetMetaDataOperator::InitLocal<ParquetMetadataOperatorType::COLUMN_META_DATA>) {
 	table_scan_progress = ParquetMetaDataOperator::Progress;
 }
 } // namespace duckdb
