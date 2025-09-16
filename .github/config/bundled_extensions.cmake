@@ -18,6 +18,7 @@ duckdb_extension_load(icu)
 duckdb_extension_load(json)
 duckdb_extension_load(parquet)
 duckdb_extension_load(autocomplete)
+duckdb_extension_load(ducklake)
 
 #
 ## Extensions that are not linked, but we do want to test them as part of the release build

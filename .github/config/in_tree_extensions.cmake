@@ -12,6 +12,7 @@ duckdb_extension_load(json)
 duckdb_extension_load(parquet)
 duckdb_extension_load(tpcds)
 duckdb_extension_load(tpch)
+duckdb_extension_load(ducklake)
 
 # Test extension for the upcoming C CAPI extensions
 duckdb_extension_load(demo_capi DONT_LINK)
