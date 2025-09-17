@@ -829,7 +829,7 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 		}
 		ParquetColumnSchema col_schema;
 		col_schema.type = reader->DeriveLogicalType(schema_element, col_schema);
-		column_schemas.push_back(col_schema);
+		column_schemas.push_back(std::move(col_schema));
 	}
 
 	aggs.clear();
@@ -917,11 +917,10 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 				} else {
 					const auto &schema_ele = agg.schema;
 					const auto &lt = agg.type;
-					Value min_v;
-					min_v = stats.__isset.min_value
+					Value min_v = stats.__isset.min_value
 					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min_value)
 					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min);
-					if (agg.min_value.IsNull()) {
+					if (min_v.IsNull()) {
 						agg.min_value = min_v;
 						agg.min_is_exact_all = false;
 						break; // No need to continue, min is null
@@ -954,10 +953,9 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 			} else {
 				const auto &schema_ele = agg.schema;
 				const auto &lt = agg.type;
-				Value max_v;
-				max_v = stats.__isset.max_value ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
+				Value max_v = stats.__isset.max_value ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
 				                                : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
-				if (agg.max_value.IsNull()) {
+				if (max_v.IsNull()) {
 					agg.max_value = max_v;
 					agg.max_is_exact_all = false;
 					break; // No need to continue, max is null
