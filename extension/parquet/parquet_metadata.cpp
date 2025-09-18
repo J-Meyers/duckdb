@@ -12,6 +12,13 @@
 #include "parquet_reader.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/value_operations/value_operations.hpp"
+#include "duckdb/common/operator/comparison_operators.hpp"
+#include "duckdb/function/aggregate/distributive_functions.hpp"
+
+// Feature flag for string-based comparison optimization for non-numeric types
+#ifndef PARQUET_METADATA_STRING_COMPARE_OPTIMIZATION
+#define PARQUET_METADATA_STRING_COMPARE_OPTIMIZATION true
+#endif
 
 namespace duckdb {
 
@@ -819,6 +826,299 @@ static inline void MergeBBox(GeoBBoxAgg &agg_bbox, const duckdb_parquet::Boundin
 	}
 }
 
+static duckdb::Value ConvertMinFromParquetStats(const LogicalType &type, const ParquetColumnSchema &schema_ele,
+                                                const duckdb_parquet::Statistics &stats) {
+	if (stats.__isset.min_value) {
+		return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.min_value);
+	}
+	return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.min);
+}
+
+static duckdb::Value ConvertMaxFromParquetStats(const LogicalType &type, const ParquetColumnSchema &schema_ele,
+                                                const duckdb_parquet::Statistics &stats) {
+	if (stats.__isset.max_value) {
+		return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.max_value);
+	}
+	return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.max);
+}
+
+// State-based computation for numeric types
+template <typename T, bool IS_MIN>
+static duckdb::Value ComputeMinMaxWithState(const duckdb_parquet::FileMetaData *meta, idx_t col_idx,
+                                            ColumnAggState &agg) {
+	const auto &lt = agg.type;
+	const auto &schema_ele = agg.schema;
+
+	if (meta->row_groups.size() == 0) {
+		return Value();
+	}
+
+	T state;
+	{
+		auto &first_rg = meta->row_groups[0];
+		auto &first_col_chunk = first_rg.columns[col_idx];
+		auto &first_col_meta = first_col_chunk.meta_data;
+		auto &first_stats = first_col_meta.statistics;
+		duckdb::Value value;
+		if (IS_MIN) {
+			value = ConvertMinFromParquetStats(lt, schema_ele, first_stats);
+		} else {
+			value = ConvertMaxFromParquetStats(lt, schema_ele, first_stats);
+		}
+		if (value.IsNull()) {
+			return Value(); // Propagate null - any null makes result null
+		}
+		state = value.GetValueUnsafe<T>();
+	}
+
+	// Process each row group value incrementally
+	for (idx_t rg_idx = 1; rg_idx < meta->row_groups.size(); rg_idx++) {
+		auto &rg = meta->row_groups[rg_idx];
+		auto &col_chunk = rg.columns[col_idx];
+		auto &col_meta = col_chunk.meta_data;
+		auto &stats = col_meta.statistics;
+
+		// Convert parquet stat to DuckDB value
+		duckdb::Value value;
+		if (IS_MIN) {
+			value = ConvertMinFromParquetStats(lt, schema_ele, stats);
+		} else {
+			value = ConvertMaxFromParquetStats(lt, schema_ele, stats);
+		}
+
+		if (value.IsNull()) {
+			return Value(); // Propagate null - any null makes result null
+		}
+
+		// Extract the typed value and update state
+		T typed_value = value.GetValueUnsafe<T>();
+		bool should_update;
+		if (IS_MIN) {
+			should_update = typed_value < state;
+		} else {
+			should_update = typed_value > state;
+		}
+
+		if (should_update) {
+			state = typed_value;
+		}
+	}
+
+	// Create a vector with the correct logical type and extract the value
+	Vector result_vector(lt, 1);
+	result_vector.SetValue(0, Value::CreateValue<T>(state));
+	return result_vector.GetValue(0);
+}
+
+// String-based comparison optimization for non-numeric types
+template <bool IS_MIN>
+static duckdb::Value ComputeMinMaxStringBased(const duckdb_parquet::FileMetaData *meta, idx_t col_idx,
+                                              ColumnAggState &agg) {
+	const auto &lt = agg.type;
+	const auto &schema_ele = agg.schema;
+
+	if (meta->row_groups.size() == 0) {
+		return Value();
+	}
+
+	// Get raw string representation directly from parquet stats
+	string result_str;
+	{
+
+		auto &first_rg = meta->row_groups[0];
+		auto &first_col_chunk = first_rg.columns[col_idx];
+		auto &first_col_meta = first_col_chunk.meta_data;
+		auto &first_stats = first_col_meta.statistics;
+		if (IS_MIN) {
+			if (first_stats.__isset.min_value) {
+				result_str = first_stats.min_value;
+			} else if (first_stats.__isset.min) {
+				result_str = first_stats.min;
+			} else {
+				return Value(); // No min stat available
+			}
+		} else {
+			if (first_stats.__isset.max_value) {
+				result_str = first_stats.max_value;
+			} else if (first_stats.__isset.max) {
+				result_str = first_stats.max;
+			} else {
+				return Value(); // No max stat available
+			}
+		}
+	}
+
+	// Process remaining row group values
+	for (idx_t rg_idx = 1; rg_idx < meta->row_groups.size(); rg_idx++) {
+		auto &rg = meta->row_groups[rg_idx];
+		auto &col_chunk = rg.columns[col_idx];
+		auto &col_meta = col_chunk.meta_data;
+		auto &stats = col_meta.statistics;
+
+		// Get raw string representation directly from parquet stats
+		string stat_str;
+		if (IS_MIN) {
+			if (stats.__isset.min_value) {
+				stat_str = stats.min_value;
+			} else if (stats.__isset.min) {
+				stat_str = stats.min;
+			} else {
+				return Value(); // No min stat available
+			}
+		} else {
+			if (stats.__isset.max_value) {
+				stat_str = stats.max_value;
+			} else if (stats.__isset.max) {
+				stat_str = stats.max;
+			} else {
+				return Value(); // No max stat available
+			}
+		}
+
+		// String comparison
+		bool should_update;
+		if (IS_MIN) {
+			should_update = result_str > stat_str;
+		} else {
+			should_update = result_str < stat_str;
+		}
+
+		if (should_update) {
+			result_str = stat_str;
+		}
+	}
+
+	// Convert final string result back to proper type
+	return ParquetStatisticsUtils::ConvertValue(lt, schema_ele, result_str);
+}
+
+// Value-based fallback for all types using ValueOperations
+template <bool IS_MIN>
+static duckdb::Value ComputeMinMaxValueBased(const duckdb_parquet::FileMetaData *meta, idx_t col_idx,
+                                             ColumnAggState &agg) {
+	const auto &lt = agg.type;
+	const auto &schema_ele = agg.schema;
+
+	if (meta->row_groups.size() == 0) {
+		return Value();
+	}
+
+	// Initialize with first row group's value (like other implementations)
+	auto &first_rg = meta->row_groups[0];
+	auto &first_col_chunk = first_rg.columns[col_idx];
+	auto &first_col_meta = first_col_chunk.meta_data;
+	auto &first_stats = first_col_meta.statistics;
+
+	duckdb::Value result;
+	if (IS_MIN) {
+		result = ConvertMinFromParquetStats(lt, schema_ele, first_stats);
+	} else {
+		result = ConvertMaxFromParquetStats(lt, schema_ele, first_stats);
+	}
+
+	if (result.IsNull()) {
+		return Value(); // Propagate null
+	}
+
+	// Process remaining row group values
+	for (idx_t rg_idx = 1; rg_idx < meta->row_groups.size(); rg_idx++) {
+		auto &rg = meta->row_groups[rg_idx];
+		auto &col_chunk = rg.columns[col_idx];
+		auto &col_meta = col_chunk.meta_data;
+		auto &stats = col_meta.statistics;
+
+		duckdb::Value value;
+		if (IS_MIN) {
+			value = ConvertMinFromParquetStats(lt, schema_ele, stats);
+		} else {
+			value = ConvertMaxFromParquetStats(lt, schema_ele, stats);
+		}
+
+		if (value.IsNull()) {
+			return Value(); // Propagate null
+		}
+
+		// Use ValueOperations for comparison
+		bool should_update;
+		if (IS_MIN) {
+			should_update = ValueOperations::GreaterThan(result, value);
+		} else {
+			should_update = ValueOperations::GreaterThan(value, result);
+		}
+
+		if (should_update) {
+			result = value;
+		}
+	}
+
+	return result;
+}
+
+// Enhanced dispatch with state-based optimization for numeric types
+template <bool IS_MIN>
+static duckdb::Value ComputeMinMaxIncremental(const duckdb_parquet::FileMetaData *meta, idx_t col_idx,
+                                              ColumnAggState &agg) {
+	const auto &lt = agg.type;
+	auto physical_type = lt.InternalType();
+
+	if (meta->row_groups.size() == 0) {
+		return Value();
+	}
+
+	// Use state-based optimization for numeric types
+	if (lt.IsNumeric()) {
+		switch (physical_type) {
+		case PhysicalType::BOOL:
+			return ComputeMinMaxWithState<bool, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::UINT8:
+			return ComputeMinMaxWithState<uint8_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::INT8:
+			return ComputeMinMaxWithState<int8_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::UINT16:
+			return ComputeMinMaxWithState<uint16_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::INT16:
+			return ComputeMinMaxWithState<int16_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::UINT32:
+			return ComputeMinMaxWithState<uint32_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::INT32:
+			return ComputeMinMaxWithState<int32_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::UINT64:
+			return ComputeMinMaxWithState<uint64_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::INT64:
+			return ComputeMinMaxWithState<int64_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::FLOAT:
+			return ComputeMinMaxWithState<float, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::DOUBLE:
+			return ComputeMinMaxWithState<double, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::UINT128:
+			return ComputeMinMaxWithState<uhugeint_t, IS_MIN>(meta, col_idx, agg);
+		case PhysicalType::INT128:
+			return ComputeMinMaxWithState<hugeint_t, IS_MIN>(meta, col_idx, agg);
+		default:
+			// Numeric type not yet supported by state optimization, fall through
+			break;
+		}
+	}
+
+	// For non-numeric types, use string-based comparison if optimization is enabled
+	if (PARQUET_METADATA_STRING_COMPARE_OPTIMIZATION) {
+		// For non-string types, try string-based comparison optimization
+		return ComputeMinMaxStringBased<IS_MIN>(meta, col_idx, agg);
+	}
+
+	// Fallback to value-based approach
+	return ComputeMinMaxValueBased<IS_MIN>(meta, col_idx, agg);
+}
+
+// Dispatch functions
+static duckdb::Value ComputeMinDispatch(const duckdb_parquet::FileMetaData *meta, idx_t col_idx, ColumnAggState &agg) {
+	return ComputeMinMaxIncremental<true>(meta, col_idx, agg);
+}
+
+static duckdb::Value ComputeMaxDispatch(const duckdb_parquet::FileMetaData *meta, idx_t col_idx, ColumnAggState &agg) {
+	return ComputeMinMaxIncremental<false>(meta, col_idx, agg);
+}
+
 void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) {
 	auto meta = reader->GetFileMetadata();
 	column_schemas.clear();
@@ -901,76 +1201,36 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 			}
 		}
 
-		// min combined with min_is_exact_all
+		// min_is_exact_all
 		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
 			auto &rg = meta->row_groups[rg_idx];
 			auto &col_chunk = rg.columns[col_idx];
 			auto &col_meta = col_chunk.meta_data;
 			auto &stats = col_meta.statistics;
 
-			const bool have_min = stats.__isset.min_value || stats.__isset.min;
-			if ((rg_idx == 0) || !agg.min_value.IsNull()) {
-				if (!have_min) {
-					agg.min_value = Value();
-					agg.min_is_exact_all = false;
-					break; // No need to continue, min is null
-				} else {
-					const auto &schema_ele = agg.schema;
-					const auto &lt = agg.type;
-					Value min_v = stats.__isset.min_value
-					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min_value)
-					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min);
-					if (min_v.IsNull()) {
-						agg.min_value = min_v;
-						agg.min_is_exact_all = false;
-						break; // No need to continue, min is null
-					}
-					if (rg_idx == 0) {
-						agg.min_value = min_v;
-					} else if (ValueOperations::LessThan(min_v, agg.min_value)) {
-						agg.min_value = min_v;
-					}
-
-					if (!(stats.__isset.is_min_value_exact && stats.is_min_value_exact)) {
-						agg.min_is_exact_all = false;
-					}
-				}
+			if (!stats.__isset.is_min_value_exact) {
+				agg.min_is_exact_all = false;
+				break;
 			}
 		}
 
-		// max combined with max_is_exact_all
+		// max_is_exact_all
 		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
 			auto &rg = meta->row_groups[rg_idx];
 			auto &col_chunk = rg.columns[col_idx];
 			auto &col_meta = col_chunk.meta_data;
 			auto &stats = col_meta.statistics;
-
-			const bool have_max = stats.__isset.max_value || stats.__isset.max;
-			if (!have_max) {
-				agg.max_value = Value();
+			if (!stats.__isset.is_max_value_exact) {
 				agg.max_is_exact_all = false;
-				break; // No need to continue, max is null
-			} else {
-				const auto &schema_ele = agg.schema;
-				const auto &lt = agg.type;
-				Value max_v = stats.__isset.max_value ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
-				                                : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
-				if (max_v.IsNull()) {
-					agg.max_value = max_v;
-					agg.max_is_exact_all = false;
-					break; // No need to continue, max is null
-				}
-				if (rg_idx == 0) {
-					agg.max_value = max_v;
-				} else if (ValueOperations::GreaterThan(max_v, agg.max_value)) {
-					agg.max_value = max_v;
-				}
-
-				if (!(stats.__isset.is_max_value_exact && stats.is_max_value_exact)) {
-					agg.max_is_exact_all = false;
-				}
+				break;
 			}
 		}
+
+		// min_value
+		agg.min_value = ComputeMinDispatch(meta, col_idx, agg);
+
+		// max_value
+		agg.max_value = ComputeMaxDispatch(meta, col_idx, agg);
 
 		// bbox
 		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
