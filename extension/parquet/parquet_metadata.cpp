@@ -836,6 +836,65 @@ static inline void MergeBBox(GeoBBoxAgg &agg_bbox, const duckdb_parquet::Boundin
 	}
 }
 
+static duckdb::Value ConvertMinFromParquetStats(const LogicalType &type, const ParquetColumnSchema &schema_ele,
+                                                const duckdb_parquet::Statistics &stats) {
+	if (stats.__isset.min_value) {
+		return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.min_value);
+	}
+	return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.min);
+}
+
+static duckdb::Value ConvertMaxFromParquetStats(const LogicalType &type, const ParquetColumnSchema &schema_ele,
+                                                const duckdb_parquet::Statistics &stats) {
+	if (stats.__isset.max_value) {
+		return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.max_value);
+	}
+	return ParquetStatisticsUtils::ConvertValue(type, schema_ele, stats.max);
+}
+
+template <bool IS_MIN>
+static Value UpdateMinMaxStats(const duckdb_parquet::FileMetaData *meta, idx_t col_idx, ColumnAggState &agg) {
+	const auto &schema_ele = agg.schema;
+	const auto &lt = agg.type;
+
+	duckdb::Value result;
+	if (meta->row_groups.size() == 0) {
+		return result;
+	}
+
+	if (IS_MIN) {
+		result = ConvertMinFromParquetStats(lt, schema_ele, meta->row_groups[0].columns[col_idx].meta_data.statistics);
+	} else {
+		result = ConvertMaxFromParquetStats(lt, schema_ele, meta->row_groups[0].columns[col_idx].meta_data.statistics);
+	}
+
+	for (idx_t rg_idx = 1; rg_idx < meta->row_groups.size(); rg_idx++) {
+		auto &rg = meta->row_groups[rg_idx];
+		auto &col_chunk = rg.columns[col_idx];
+		auto &col_meta = col_chunk.meta_data;
+		auto &stats = col_meta.statistics;
+
+		const bool have_val = stats.__isset.min_value || stats.__isset.min;
+		if (!have_val) {
+			return Value();
+		} else {
+			Value current_v;
+			if (IS_MIN) {
+				current_v = ConvertMinFromParquetStats(lt, schema_ele, stats);
+			} else {
+				current_v = ConvertMaxFromParquetStats(lt, schema_ele, stats);
+			}
+			if (current_v.IsNull()) {
+				return Value();
+			}
+			if (ValueOperations::LessThan(current_v, result)) {
+				result = current_v;
+			}
+		}
+	}
+	return result;
+}
+
 void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) {
 	auto meta = reader->GetFileMetadata();
 	column_schemas.clear();
@@ -918,75 +977,41 @@ void ParquetColumnMetadataProcessor::InitializeInternal(ClientContext &context) 
 			}
 		}
 
-		// min combined with min_is_exact_all
-		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
-			auto &rg = meta->row_groups[rg_idx];
-			auto &col_chunk = rg.columns[col_idx];
-			auto &col_meta = col_chunk.meta_data;
-			auto &stats = col_meta.statistics;
+		// min
+		agg.min_value = UpdateMinMaxStats<true>(meta, col_idx, agg);
 
-			const bool have_min = stats.__isset.min_value || stats.__isset.min;
-			if ((rg_idx == 0) || !agg.min_value.IsNull()) {
-				if (!have_min) {
-					agg.min_value = Value();
+		// min_is_exact_all
+		if (!agg.min_value.IsNull()) {
+			for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+				auto &rg = meta->row_groups[rg_idx];
+				auto &col_chunk = rg.columns[col_idx];
+				auto &col_meta = col_chunk.meta_data;
+				auto &stats = col_meta.statistics;
+				if (!(stats.__isset.is_min_value_exact && stats.is_min_value_exact)) {
 					agg.min_is_exact_all = false;
-					break; // No need to continue, min is null
-				} else {
-					const auto &schema_ele = agg.schema;
-					const auto &lt = agg.type;
-					Value min_v = stats.__isset.min_value
-					            ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min_value)
-					            : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.min);
-					if (min_v.IsNull()) {
-						agg.min_value = min_v;
-						agg.min_is_exact_all = false;
-						break; // No need to continue, min is null
-					}
-					if (rg_idx == 0) {
-						agg.min_value = min_v;
-					} else if (ValueOperations::LessThan(min_v, agg.min_value)) {
-						agg.min_value = min_v;
-					}
-
-					if (!(stats.__isset.is_min_value_exact && stats.is_min_value_exact)) {
-						agg.min_is_exact_all = false;
-					}
+					break;
 				}
 			}
+		} else {
+			agg.min_is_exact_all = false;
 		}
 
-		// max combined with max_is_exact_all
-		for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
-			auto &rg = meta->row_groups[rg_idx];
-			auto &col_chunk = rg.columns[col_idx];
-			auto &col_meta = col_chunk.meta_data;
-			auto &stats = col_meta.statistics;
-
-			const bool have_max = stats.__isset.max_value || stats.__isset.max;
-			if (!have_max) {
-				agg.max_value = Value();
-				agg.max_is_exact_all = false;
-				break; // No need to continue, max is null
-			} else {
-				const auto &schema_ele = agg.schema;
-				const auto &lt = agg.type;
-				Value max_v = stats.__isset.max_value ? ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max_value)
-				                                : ParquetStatisticsUtils::ConvertValue(lt, schema_ele, stats.max);
-				if (max_v.IsNull()) {
-					agg.max_value = max_v;
-					agg.max_is_exact_all = false;
-					break; // No need to continue, max is null
-				}
-				if (rg_idx == 0) {
-					agg.max_value = max_v;
-				} else if (ValueOperations::GreaterThan(max_v, agg.max_value)) {
-					agg.max_value = max_v;
-				}
-
+		// max
+		agg.max_value = UpdateMinMaxStats<false>(meta, col_idx, agg);
+		// max_is_exact_all
+		if (!agg.max_value.IsNull()) {
+			for (idx_t rg_idx = 0; rg_idx < meta->row_groups.size(); rg_idx++) {
+				auto &rg = meta->row_groups[rg_idx];
+				auto &col_chunk = rg.columns[col_idx];
+				auto &col_meta = col_chunk.meta_data;
+				auto &stats = col_meta.statistics;
 				if (!(stats.__isset.is_max_value_exact && stats.is_max_value_exact)) {
 					agg.max_is_exact_all = false;
+					break;
 				}
 			}
+		} else {
+			agg.max_is_exact_all = false;
 		}
 
 		// bbox
