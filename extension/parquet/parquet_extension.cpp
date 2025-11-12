@@ -979,9 +979,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ParquetBloomProbeFunction bloom_probe_fun;
 	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(bloom_probe_fun));
 
-	// parquet_column_metadata
-	ParquetColumnMetadataFunction column_meta_fun;
-	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(column_meta_fun));
+	// parquet_full_metadata
+	ParquetFullMetadataFunction full_meta_fun;
+	loader.RegisterFunction(MultiFileReader::CreateFunctionSet(full_meta_fun));
 
 	CopyFunction function("parquet");
 	function.copy_to_select = ParquetWriteSelect;

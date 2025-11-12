@@ -38,9 +38,9 @@ public:
 	ParquetBloomProbeFunction();
 };
 
-class ParquetColumnMetadataFunction : public TableFunction {
+class ParquetFullMetadataFunction : public TableFunction {
 public:
-	ParquetColumnMetadataFunction();
+	ParquetFullMetadataFunction();
 };
 
 } // namespace duckdb
