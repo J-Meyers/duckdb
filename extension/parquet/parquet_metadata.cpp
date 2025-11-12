@@ -344,20 +344,11 @@ static Value ConvertParquetGeoStatsTypes(const duckdb_parquet::GeospatialStatist
 	vector<Value> types;
 	types.reserve(stats.geospatial_types.size());
 
-	GeometryTypeSet type_set = GeometryTypeSet::Empty();
+	GeometryKindSet kind_set;
 	for (auto &type : stats.geospatial_types) {
-		const auto geom_type = (type % 1000);
-		const auto vert_type = (type / 1000);
-		if (geom_type < 1 || geom_type > 7) {
-			throw InvalidInputException("Unsupported geometry type in Parquet geo metadata");
-		}
-		if (vert_type < 0 || vert_type > 3) {
-			throw InvalidInputException("Unsupported geometry vertex type in Parquet geo metadata");
-		}
-		type_set.Add(static_cast<GeometryType>(geom_type), static_cast<VertexType>(vert_type));
+		kind_set.Add(type);
 	}
-
-	for (auto &type_name : type_set.ToString(true)) {
+	for (auto &type_name : kind_set.ToString(true)) {
 		types.push_back(Value(type_name));
 	}
 	return Value::LIST(LogicalType::VARCHAR, types);
