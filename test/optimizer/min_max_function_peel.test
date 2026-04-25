@@ -1,0 +1,91 @@
+# name: test/optimizer/min_max_function_peel.test
+# description: Test MIN/MAX folding through invertible casts, monotonic function wrappers, and arithmetic operators
+# group: [optimizer]
+
+require no_alternative_verify
+
+load {TEST_DIR}/peel.db
+
+statement ok
+CREATE TABLE t AS SELECT
+  i::INTEGER AS bi,
+  i::DOUBLE AS d,
+  DATE '2020-01-01' + INTERVAL (i) DAY AS dt,
+  TIMESTAMP '2020-01-01' + INTERVAL (i) HOUR AS ts
+FROM range(2048) _(i)
+
+restart
+
+# Tier 1: single-arg monotonic wrapper
+query II
+EXPLAIN SELECT MIN(year(dt)), MAX(year(dt)) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query II
+SELECT MIN(year(dt)), MAX(year(dt)) FROM t
+----
+2020	2025
+
+# Tier 2: literal config + monotonic column at non-zero arg index (date_diff at idx 2)
+query II
+EXPLAIN SELECT MIN(date_diff('day', DATE '2020-01-01', dt)) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# column on the start side (idx 1) instead of the registered idx 2: must NOT fold
+query II
+EXPLAIN SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# alias: bound function name carries the alias, so each alias is a separate entry
+query II
+EXPLAIN SELECT MIN(ceiling(d)) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# === arithmetic ===
+
+# commutative + : column on either side
+query II
+EXPLAIN SELECT MIN(bi + 5), MIN(5 + bi) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query II
+SELECT MIN(bi + 5), MIN(bi - 5) FROM t
+----
+5	-5
+
+# date_add is lowered to dt + interval by the binder; covered by the + entry
+query II
+EXPLAIN SELECT MIN(date_add(dt, INTERVAL '7 day')) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# unary minus is decreasing, must NOT fold
+query II
+EXPLAIN SELECT MIN(-bi) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# lit - col is decreasing, must NOT fold
+query II
+EXPLAIN SELECT MIN(5 - bi) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# === things deliberately not handled ===
+
+# month / day / hour / etc. wrap modulo their period
+query II
+EXPLAIN SELECT MIN(month(dt)) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# * and / have sign-dependent monotonicity (depends on the literal value)
+query II
+EXPLAIN SELECT MIN(d * 2.0) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
