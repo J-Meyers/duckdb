@@ -75,6 +75,13 @@ public:
 	DUCKDB_API explicit ScalarFunctionSet(ScalarFunction fun);
 
 	DUCKDB_API ScalarFunction GetFunctionByArguments(ClientContext &context, const vector<LogicalType> &arguments);
+
+	//! Apply the same monotonicity declaration to every overload in the set.
+	void SetMonotonicity(FunctionMonotonicity monotonicity) {
+		for (auto &fun : functions) {
+			fun.SetMonotonicity(monotonicity);
+		}
+	}
 };
 
 class AggregateFunctionSet : public FunctionSet<AggregateFunction> {

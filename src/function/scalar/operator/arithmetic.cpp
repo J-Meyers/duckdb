@@ -690,18 +690,22 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::INTERVAL) {
 		ScalarFunction func("-", {type}, type, ScalarFunction::UnaryFunction<interval_t, interval_t, NegateOperator>);
 		func.SetFallible();
+		func.SetMonotonicity(FunctionMonotonicity::Inverts(0));
 		return func;
 	} else if (type.id() == LogicalTypeId::DECIMAL) {
 		ScalarFunction func("-", {type}, type, nullptr, DecimalNegateBind, NegateBindStatistics);
+		func.SetMonotonicity(FunctionMonotonicity::Inverts(0));
 		return func;
 	} else if (type.id() == LogicalTypeId::BIGNUM) {
 		ScalarFunction func("+", {type}, LogicalType::BIGNUM, BignumNegate);
+		func.SetMonotonicity(FunctionMonotonicity::Inverts(0));
 		return func;
 	} else {
 		D_ASSERT(type.IsNumeric());
 		ScalarFunction func("-", {type}, type, ScalarFunction::GetScalarUnaryFunction<NegateOperator>(type),
 		                    IntegerNegateBind, NegateBindStatistics);
 		func.SetFallible();
+		func.SetMonotonicity(FunctionMonotonicity::Inverts(0));
 		return func;
 	}
 }
@@ -715,6 +719,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			function.SetSerializeCallback(SerializeDecimalArithmetic);
 			function.SetDeserializeCallback(
 			    DeserializeDecimalArithmetic<SubtractOperator, DecimalSubtractOverflowCheck>);
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		} else if (left_type.IsIntegral()) {
 			ScalarFunction function(
@@ -722,12 +727,14 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    GetScalarIntegerFunction<SubtractOperatorOverflowCheck>(left_type.InternalType()), nullptr,
 			    PropagateNumericStats<TrySubtractOperator, SubtractPropagateStatistics, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 
 		} else {
 			ScalarFunction function("-", {left_type, right_type}, left_type,
 			                        GetScalarBinaryFunction<SubtractOperator>(left_type.InternalType()));
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 	}
@@ -735,6 +742,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 	switch (left_type.id()) {
 	case LogicalTypeId::BIGNUM: {
 		ScalarFunction function("-", {left_type, right_type}, left_type, BignumSubtract);
+		function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 		return function;
 	}
 	case LogicalTypeId::DATE:
@@ -742,17 +750,20 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::BIGINT,
 			                        ScalarFunction::BinaryFunction<date_t, date_t, int64_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 
 		} else if (right_type.id() == LogicalTypeId::INTEGER) {
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::DATE,
 			                        ScalarFunction::BinaryFunction<date_t, int32_t, date_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		} else if (right_type.id() == LogicalTypeId::INTERVAL) {
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::TIMESTAMP,
 			                        ScalarFunction::BinaryFunction<date_t, interval_t, timestamp_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 		break;
@@ -762,12 +773,14 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    "-", {left_type, right_type}, LogicalType::INTERVAL,
 			    ScalarFunction::BinaryFunction<timestamp_t, timestamp_t, interval_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		} else if (right_type.id() == LogicalTypeId::INTERVAL) {
 			ScalarFunction function(
 			    "-", {left_type, right_type}, LogicalType::TIMESTAMP,
 			    ScalarFunction::BinaryFunction<timestamp_t, interval_t, timestamp_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 		break;
@@ -777,6 +790,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    "-", {left_type, right_type}, LogicalType::INTERVAL,
 			    ScalarFunction::BinaryFunction<interval_t, interval_t, interval_t, SubtractOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 		break;
@@ -785,6 +799,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::TIME,
 			                        ScalarFunction::BinaryFunction<dtime_t, interval_t, dtime_t, SubtractTimeOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 		break;
@@ -794,6 +809,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    "-", {left_type, right_type}, LogicalType::TIME_TZ,
 			    ScalarFunction::BinaryFunction<dtime_tz_t, interval_t, dtime_tz_t, SubtractTimeOperator>);
 			function.SetFallible();
+			function.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(0, 1));
 			return function;
 		}
 		break;

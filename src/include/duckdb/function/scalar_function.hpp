@@ -182,7 +182,7 @@ public:
 	                          LogicalType varargs = LogicalType(LogicalTypeId::INVALID),
 	                          FunctionStability stability = FunctionStability::CONSISTENT,
 	                          FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                          bind_lambda_function_t bind_lambda = nullptr);
+	                          bind_lambda_function_t bind_lambda = nullptr, FunctionMonotonicity monotonicity = {});
 
 	DUCKDB_API ScalarFunction(vector<LogicalType> arguments, LogicalType return_type, scalar_function_t function,
 	                          bind_scalar_function_t bind = nullptr, function_statistics_t statistics = nullptr,
@@ -190,7 +190,7 @@ public:
 	                          LogicalType varargs = LogicalType(LogicalTypeId::INVALID),
 	                          FunctionStability stability = FunctionStability::CONSISTENT,
 	                          FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                          bind_lambda_function_t bind_lambda = nullptr);
+	                          bind_lambda_function_t bind_lambda = nullptr, FunctionMonotonicity monotonicity = {});
 
 	// clang-format off
 	// Keep these on one-line for readability
@@ -240,6 +240,13 @@ public:
 	propagate_filter_t GetFilterPruneCallback() const { return callbacks.filter_prune; }
 	// clang-format on
 
+	const FunctionMonotonicity &GetMonotonicity() const {
+		return monotonicity;
+	}
+	void SetMonotonicity(FunctionMonotonicity monotonicity_p) {
+		monotonicity = monotonicity_p;
+	}
+
 	bool HasExtraFunctionInfo() const {
 		return function_info != nullptr;
 	}
@@ -261,6 +268,8 @@ protected:
 
 	//! Additional function info, passed to the bind
 	shared_ptr<ScalarFunctionInfo> function_info;
+	//! Per-arg monotonicity declaration; default-constructed = no claims made.
+	FunctionMonotonicity monotonicity;
 
 public:
 	// clang-format off

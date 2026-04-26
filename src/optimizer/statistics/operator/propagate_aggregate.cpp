@@ -77,6 +77,13 @@ unique_ptr<ValueComparator> GetComparator(const string &fun_name, const LogicalT
 	return nullptr;
 }
 
+unique_ptr<ValueComparator> FlipComparator(const string &fun_name, const LogicalType &type) {
+	D_ASSERT(fun_name == "min" || fun_name == "max");
+	// "min" → MaxValueComp, "max" → MinValueComp
+	const string flipped = (fun_name == "min") ? "max" : "min";
+	return GetComparator(flipped, type);
+}
+
 bool TryGetValueFromStats(const PartitionStatistics &stats, const StorageIndex &storage_index,
                           const ValueComparator &comparator, Value &result) {
 	if (!stats.partition_row_group) {
@@ -104,61 +111,8 @@ bool TryGetValueFromStats(const PartitionStatistics &stats, const StorageIndex &
 	return true;
 }
 
-// Allowlist of scalar functions whose output is non-decreasing in the argument
-// at monotonic_arg_index. Entries match BoundFunctionExpression::function.name,
-// which carries the alias the user typed, so every alias must be listed.
-struct PeelableFunctionInfo {
-	const char *name;
-	idx_t monotonic_arg_index;
-};
-
-// clang-format off
-const PeelableFunctionInfo PEELABLE_FUNCTIONS[] = {
-    {"make_date",         0},
-    {"make_timestamp",    0},
-    {"make_timestamp_ms", 0},
-    {"make_timestamp_ns", 0},
-    {"epoch_ms",          0},
-    {"epoch_us",          0},
-    {"epoch_ns",          0},
-    {"epoch",             0},
-    {"to_timestamp",      0},
-    {"floor",             0},
-    {"ceil",              0},
-    {"ceiling",           0},
-    {"trunc",             0},
-    {"cbrt",              0},
-    {"exp",               0},
-    {"year",              0},
-    {"isoyear",           0},
-    {"yearweek",          0},
-    {"century",           0},
-    {"decade",            0},
-    {"millennium",        0},
-    {"era",               0},
-    {"round",             0},
-    {"time_bucket",       1},
-    {"date_trunc",        1},
-    {"datetrunc",         1},
-    {"date_diff",         2},
-    {"datediff",          2},
-    {"date_sub",          2},
-    {"datesub",           2},
-    {"-",                 0}, // col - lit; unary minus is rejected by an arity guard below
-};
-// clang-format on
-
-optional_idx GetPeelableMonotonicArgIndex(const string &name) {
-	for (const auto &f : PEELABLE_FUNCTIONS) {
-		if (name == f.name) {
-			return optional_idx(f.monotonic_arg_index);
-		}
-	}
-	return optional_idx();
-}
-
-// `+` is commutative so the column may sit at either side; treated as a separate shape
-// from the fixed-position allowlist. Returns the column-side index on success.
+// `+` is commutative so the column may sit at either side; per-arg metadata can't express
+// "monotonic in either arg". Returns the column-side index on success.
 bool TryPeelCommutativeAdd(const BoundFunctionExpression &fun, idx_t &target_idx) {
 	if (fun.function.name != "+" || fun.children.size() != 2) {
 		return false;
@@ -172,9 +126,10 @@ bool TryPeelCommutativeAdd(const BoundFunctionExpression &fun, idx_t &target_idx
 	return true;
 }
 
-// Walks `expr` through invertible casts and allowlisted monotonic functions.
-// On success `inner_binding` holds the binding of the column ref at the bottom.
-bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_binding) {
+// Walks `expr` through invertible casts and scalar functions with declared monotonicity.
+// On success `inner_binding` holds the binding of the column ref at the bottom and
+// `inverted` is toggled for each INVERTS_INPUT_ORDER hop traversed (accumulated XOR).
+bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_binding, bool &inverted) {
 	reference<const Expression> e = expr;
 	while (true) {
 		if (e.get().type == ExpressionType::BOUND_COLUMN_REF) {
@@ -191,32 +146,44 @@ bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_bin
 		}
 		if (e.get().GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 			auto &fun = e.get().Cast<BoundFunctionExpression>();
-			// Allowlist should already guard against this, but this check should be faster
 			if (fun.function.GetStability() != FunctionStability::CONSISTENT) {
 				return false;
 			}
+			// `+` is commutative; per-arg metadata can't express "monotonic in either arg"
 			idx_t target_idx;
 			if (TryPeelCommutativeAdd(fun, target_idx)) {
 				e = *fun.children[target_idx];
 				continue;
 			}
-			auto monotonic_idx = GetPeelableMonotonicArgIndex(fun.function.name);
-			if (!monotonic_idx.IsValid() || monotonic_idx.GetIndex() >= fun.children.size()) {
+			const auto &monotonicity = fun.function.GetMonotonicity();
+			if (!monotonicity.HasMonotonicArg()) {
 				return false;
 			}
-			// unary "-" is decreasing; only binary subtract is monotonic in arg 0
-			if (fun.function.name == "-" && fun.children.size() < 2) {
-				return false;
-			}
+			// Find the single non-foldable child; that's the column-path arg. All other args
+			// must be foldable (compile-time constants) for monotonicity to hold.
+			idx_t column_arg = DConstants::INVALID_INDEX;
 			for (idx_t i = 0; i < fun.children.size(); i++) {
-				if (i == monotonic_idx.GetIndex()) {
+				if (fun.children[i]->IsFoldable()) {
 					continue;
 				}
-				if (!fun.children[i]->IsFoldable()) {
-					return false;
+				if (column_arg != DConstants::INVALID_INDEX) {
+					return false; // more than one non-foldable arg, e.g. col1 - col2
 				}
+				column_arg = i;
 			}
-			e = *fun.children[monotonic_idx.GetIndex()];
+			if (column_arg == DConstants::INVALID_INDEX) {
+				return false; // entirely foldable; nothing to walk into
+			}
+			switch (monotonicity.GetOutputOrderForArg(column_arg)) {
+			case FunctionOutputOrder::MATCHES_INPUT_ORDER:
+				break;
+			case FunctionOutputOrder::INVERTS_INPUT_ORDER:
+				inverted = !inverted;
+				break;
+			case FunctionOutputOrder::UNSPECIFIED:
+				return false; // function isn't monotonic in the only column arg available
+			}
+			e = *fun.children[column_arg];
 			continue;
 		}
 		return false;
@@ -243,8 +210,11 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 	vector<idx_t> count_star_idxs;
 	vector<ColumnBinding> min_max_bindings;
 	vector<unique_ptr<ValueComparator>> comparators;
+	vector<string> agg_fun_names;
+	vector<LogicalType> agg_arg_types;
 	// wrapper sitting directly inside MIN/MAX (no intervening projection); seeds the chain
 	vector<unique_ptr<Expression>> agg_arg_wrappers;
+	vector<bool> wrapper_inverted; // accumulated INVERTS parity per min/max binding
 
 	for (idx_t i = 0; i < aggr.expressions.size(); i++) {
 		auto &aggr_ref = aggr.expressions[i];
@@ -264,15 +234,17 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 			}
 			auto &agg_arg = *aggr_expr.children[0];
 			ColumnBinding inner_binding;
+			bool inverted = false;
 			if (agg_arg.type == ExpressionType::BOUND_COLUMN_REF) {
 				inner_binding = agg_arg.Cast<BoundColumnRefExpression>().binding;
 				agg_arg_wrappers.emplace_back();
 			} else {
-				if (!TryExtractWrappedColumnRef(agg_arg, inner_binding)) {
+				if (!TryExtractWrappedColumnRef(agg_arg, inner_binding, inverted)) {
 					return;
 				}
 				agg_arg_wrappers.push_back(agg_arg.Copy());
 			}
+			wrapper_inverted.push_back(inverted);
 			min_max_bindings.push_back(inner_binding);
 			auto comparator = GetComparator(fun_name, agg_arg.return_type);
 			if (!comparator) {
@@ -280,6 +252,8 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 				return;
 			}
 			comparators.push_back(std::move(comparator));
+			agg_fun_names.push_back(fun_name);
+			agg_arg_types.push_back(agg_arg.return_type);
 		} else if (fun_name == "count_star") {
 			count_star_idxs.push_back(i);
 		} else {
@@ -306,10 +280,12 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 				continue;
 			}
 			ColumnBinding inner_binding;
-			if (!TryExtractWrappedColumnRef(expr, inner_binding)) {
+			bool proj_inverted = false;
+			if (!TryExtractWrappedColumnRef(expr, inner_binding, proj_inverted)) {
 				return;
 			}
 			wrapper_chains[i].push_back(expr.Copy());
+			wrapper_inverted[i] = wrapper_inverted[i] ^ proj_inverted;
 			binding = inner_binding;
 		}
 		child_ref = *child_ref.get().children[0];
@@ -409,7 +385,15 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 		// Execute min/max aggregates on partition statistics
 		for (idx_t agg_idx = 0; agg_idx < min_max_storage_indexes.size(); agg_idx++) {
 			const auto &storage_index = min_max_storage_indexes[agg_idx];
-			auto &comparator = comparators[agg_idx];
+			unique_ptr<ValueComparator> flipped_holder;
+			ValueComparator *comparator = comparators[agg_idx].get();
+			if (wrapper_inverted[agg_idx]) {
+				flipped_holder = FlipComparator(agg_fun_names[agg_idx], agg_arg_types[agg_idx]);
+				if (!flipped_holder) {
+					return;
+				}
+				comparator = flipped_holder.get();
+			}
 
 			Value agg_result;
 			if (!TryGetValueFromStats(partition_stats[0], storage_index, *comparator, agg_result)) {
