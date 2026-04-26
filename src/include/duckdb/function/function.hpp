@@ -14,6 +14,7 @@
 #include "duckdb/main/external_dependencies.hpp"
 #include "duckdb/parser/column_definition.hpp"
 #include "duckdb/common/enums/function_errors.hpp"
+#include "duckdb/common/optional_idx.hpp"
 
 namespace duckdb {
 class CatalogEntry;
@@ -46,6 +47,61 @@ enum class FunctionNullHandling : uint8_t { DEFAULT_NULL_HANDLING = 0, SPECIAL_H
 //!                            but the result might change across queries (e.g. NOW(), CURRENT_TIME)
 //! VOLATILE                -> the result of this function might change per row (e.g. RANDOM())
 enum class FunctionStability : uint8_t { CONSISTENT = 0, VOLATILE = 1, CONSISTENT_WITHIN_QUERY = 2 };
+
+//! How a scalar function's output is ordered relative to a specific argument when all
+//! other arguments are held constant. Used by the MIN/MAX statistics-folding optimizer.
+enum class FunctionOutputOrder : uint8_t {
+	UNSPECIFIED = 0,         //! No claim made; safe default
+	MATCHES_INPUT_ORDER = 1, //! Output is non-decreasing in this argument
+	INVERTS_INPUT_ORDER = 2, //! Output is non-increasing in this argument
+};
+
+//! Per-arg monotonicity declaration. A function may declare at most one MATCHES arg
+//! and at most one INVERTS arg; the declaration only holds when all OTHER arguments
+//! are foldable. Examples: year(date) -> Matches(0); unary - -> Inverts(0);
+//! binary - -> MatchesAndInverts(0, 1); date_diff(p, s, e) -> MatchesAndInverts(2, 1).
+struct FunctionMonotonicity {
+	FunctionMonotonicity() = default;
+
+	//! Declare output is non-decreasing in `arg`.
+	static FunctionMonotonicity Matches(idx_t arg) {
+		FunctionMonotonicity m;
+		m.matches_input_arg = arg;
+		return m;
+	}
+	//! Declare output is non-increasing in `arg`.
+	static FunctionMonotonicity Inverts(idx_t arg) {
+		FunctionMonotonicity m;
+		m.inverts_input_arg = arg;
+		return m;
+	}
+	//! Declare both directions in different args (e.g. binary subtract: arg 0 matches, arg 1 inverts).
+	static FunctionMonotonicity MatchesAndInverts(idx_t matches_arg, idx_t inverts_arg) {
+		FunctionMonotonicity m;
+		m.matches_input_arg = matches_arg;
+		m.inverts_input_arg = inverts_arg;
+		return m;
+	}
+
+	//! True if this declaration claims monotonicity in any argument.
+	bool HasMonotonicArg() const {
+		return matches_input_arg.IsValid() || inverts_input_arg.IsValid();
+	}
+
+	//! Returns the direction declared for `arg`, or UNSPECIFIED if none.
+	FunctionOutputOrder GetOutputOrderForArg(idx_t arg) const {
+		if (matches_input_arg.IsValid() && matches_input_arg.GetIndex() == arg) {
+			return FunctionOutputOrder::MATCHES_INPUT_ORDER;
+		}
+		if (inverts_input_arg.IsValid() && inverts_input_arg.GetIndex() == arg) {
+			return FunctionOutputOrder::INVERTS_INPUT_ORDER;
+		}
+		return FunctionOutputOrder::UNSPECIFIED;
+	}
+
+	optional_idx matches_input_arg;
+	optional_idx inverts_input_arg;
+};
 
 //! How to handle collations
 //! PROPAGATE_COLLATIONS        -> this function combines collation from its inputs and emits them again (default)

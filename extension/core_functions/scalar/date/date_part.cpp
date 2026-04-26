@@ -2112,7 +2112,9 @@ ScalarFunctionSet GetCachedDatepartFunction() {
 } // namespace
 
 ScalarFunctionSet YearFun::GetFunctions() {
-	return GetCachedDatepartFunction<DatePart::YearOperator>();
+	auto set = GetCachedDatepartFunction<DatePart::YearOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet MonthFun::GetFunctions() {
@@ -2124,15 +2126,21 @@ ScalarFunctionSet DayFun::GetFunctions() {
 }
 
 ScalarFunctionSet DecadeFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::DecadeOperator>();
+	auto set = GetDatePartFunction<DatePart::DecadeOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet CenturyFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::CenturyOperator>();
+	auto set = GetDatePartFunction<DatePart::CenturyOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet MillenniumFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::MillenniumOperator>();
+	auto set = GetDatePartFunction<DatePart::MillenniumOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet QuarterFun::GetFunctions() {
@@ -2160,11 +2168,15 @@ ScalarFunctionSet WeekFun::GetFunctions() {
 }
 
 ScalarFunctionSet ISOYearFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::ISOYearOperator>();
+	auto set = GetDatePartFunction<DatePart::ISOYearOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet EraFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::EraOperator>();
+	auto set = GetDatePartFunction<DatePart::EraOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet TimezoneFun::GetFunctions() {
@@ -2192,7 +2204,9 @@ ScalarFunctionSet TimezoneMinuteFun::GetFunctions() {
 }
 
 ScalarFunctionSet EpochFun::GetFunctions() {
-	return GetTimePartFunction<DatePart::EpochOperator, double>(LogicalType::DOUBLE);
+	auto set = GetTimePartFunction<DatePart::EpochOperator, double>(LogicalType::DOUBLE);
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 struct GetEpochNanosOperator {
@@ -2220,6 +2234,7 @@ ScalarFunctionSet EpochNsFun::GetFunctions() {
 
 	operator_set.AddFunction(
 	    ScalarFunction({LogicalType::TIMESTAMP_NS}, LogicalType::BIGINT, ExecuteGetNanosFromTimestampNs));
+	operator_set.SetMonotonicity(FunctionMonotonicity::Matches(0));
 	return operator_set;
 }
 
@@ -2232,6 +2247,7 @@ ScalarFunctionSet EpochUsFun::GetFunctions() {
 	auto tstz_stats = OP::template PropagateStatistics<timestamp_t>;
 	operator_set.AddFunction(
 	    ScalarFunction({LogicalType::TIMESTAMP_TZ}, LogicalType::BIGINT, tstz_func, nullptr, tstz_stats));
+	operator_set.SetMonotonicity(FunctionMonotonicity::Matches(0));
 	return operator_set;
 }
 
@@ -2249,6 +2265,7 @@ ScalarFunctionSet EpochMsFun::GetFunctions() {
 	operator_set.AddFunction(
 	    ScalarFunction({LogicalType::BIGINT}, LogicalType::TIMESTAMP, DatePart::EpochMillisOperator::Inverse));
 
+	operator_set.SetMonotonicity(FunctionMonotonicity::Matches(0));
 	return operator_set;
 }
 
@@ -2256,6 +2273,7 @@ ScalarFunctionSet MakeTimestampMsFun::GetFunctions() {
 	ScalarFunctionSet operator_set("make_timestamp_ms");
 	operator_set.AddFunction(
 	    ScalarFunction({LogicalType::BIGINT}, LogicalType::TIMESTAMP, DatePart::EpochMillisOperator::Inverse));
+	operator_set.SetMonotonicity(FunctionMonotonicity::Matches(0));
 	return operator_set;
 }
 
@@ -2299,7 +2317,9 @@ ScalarFunctionSet HoursFun::GetFunctions() {
 }
 
 ScalarFunctionSet YearWeekFun::GetFunctions() {
-	return GetDatePartFunction<DatePart::YearWeekOperator>();
+	auto set = GetDatePartFunction<DatePart::YearWeekOperator>();
+	set.SetMonotonicity(FunctionMonotonicity::Matches(0));
+	return set;
 }
 
 ScalarFunctionSet DayOfMonthFun::GetFunctions() {

@@ -2391,6 +2391,25 @@ FunctionNullHandling EnumUtil::FromString<FunctionNullHandling>(const char *valu
 	return static_cast<FunctionNullHandling>(StringUtil::StringToEnum(GetFunctionNullHandlingValues(), 2, "FunctionNullHandling", value));
 }
 
+const StringUtil::EnumStringLiteral *GetFunctionOutputOrderValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(FunctionOutputOrder::UNSPECIFIED), "UNSPECIFIED" },
+		{ static_cast<uint32_t>(FunctionOutputOrder::MATCHES_INPUT_ORDER), "MATCHES_INPUT_ORDER" },
+		{ static_cast<uint32_t>(FunctionOutputOrder::INVERTS_INPUT_ORDER), "INVERTS_INPUT_ORDER" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<FunctionOutputOrder>(FunctionOutputOrder value) {
+	return StringUtil::EnumToString(GetFunctionOutputOrderValues(), 3, "FunctionOutputOrder", static_cast<uint32_t>(value));
+}
+
+template<>
+FunctionOutputOrder EnumUtil::FromString<FunctionOutputOrder>(const char *value) {
+	return static_cast<FunctionOutputOrder>(StringUtil::StringToEnum(GetFunctionOutputOrderValues(), 3, "FunctionOutputOrder", value));
+}
+
 const StringUtil::EnumStringLiteral *GetFunctionStabilityValues() {
 	static constexpr StringUtil::EnumStringLiteral values[] {
 		{ static_cast<uint32_t>(FunctionStability::CONSISTENT), "CONSISTENT" },

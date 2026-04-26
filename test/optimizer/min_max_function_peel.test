@@ -33,11 +33,16 @@ EXPLAIN SELECT MIN(date_diff('day', DATE '2020-01-01', dt)) FROM t
 ----
 physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
 
-# column on the start side (idx 1) instead of the registered idx 2: must NOT fold
+# date_diff with column on the start side folds via INVERTS_INPUT_ORDER on arg 1
 query II
 EXPLAIN SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM t
 ----
-physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM t
+----
+1606
 
 # alias: bound function name carries the alias, so each alias is a separate entry
 query II
@@ -64,17 +69,46 @@ EXPLAIN SELECT MIN(date_add(dt, INTERVAL '7 day')) FROM t
 ----
 physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
 
-# unary minus is decreasing, must NOT fold
+# unary minus inverts ordering; folds via INVERTS_INPUT_ORDER + MIN/MAX swap
 query II
-EXPLAIN SELECT MIN(-bi) FROM t
+EXPLAIN SELECT MIN(-bi), MAX(-bi) FROM t
 ----
-physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
 
-# lit - col is decreasing, must NOT fold
 query II
-EXPLAIN SELECT MIN(5 - bi) FROM t
+SELECT MIN(-bi), MAX(-bi) FROM t
 ----
-physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+-2047	0
+
+# lit - col folds via INVERTS_INPUT_ORDER on arg 1 of binary -
+query II
+EXPLAIN SELECT MIN(5 - bi), MAX(5 - bi) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query II
+SELECT MIN(5 - bi), MAX(5 - bi) FROM t
+----
+-2042	5
+
+# === inversion parity through chained wrappers ===
+
+# double negation cancels: parity even, MIN stays MIN
+query II
+EXPLAIN SELECT MIN(-(-bi)) FROM t
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MIN(-(-bi)) FROM t
+----
+0
+
+# INVERTS composed with MATCHES: -(bi + 5) folds; MIN of -(bi+5) is achieved at MAX(bi)
+query I
+SELECT MIN(-(bi + 5)) FROM t
+----
+-2052
 
 # === things deliberately not handled ===
 
@@ -89,3 +123,10 @@ query II
 EXPLAIN SELECT MIN(d * 2.0) FROM t
 ----
 physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+# both args are column refs → multiple non-foldable args → must NOT fold
+query II
+EXPLAIN SELECT MIN(bi - (bi + 1)) FROM t
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+

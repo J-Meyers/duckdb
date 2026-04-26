@@ -12,20 +12,21 @@ ScalarFunction::ScalarFunction(string name, vector<LogicalType> arguments, Logic
                                scalar_function_t function, bind_scalar_function_t bind,
                                function_statistics_t statistics, init_local_state_t init_local_state,
                                LogicalType varargs, FunctionStability side_effects, FunctionNullHandling null_handling,
-                               bind_lambda_function_t bind_lambda)
+                               bind_lambda_function_t bind_lambda, FunctionMonotonicity monotonicity_p)
     : BaseScalarFunction(std::move(name), std::move(arguments), std::move(return_type), side_effects,
                          std::move(varargs), null_handling),
       function(std::move(function)), bind(bind), init_local_state(init_local_state), statistics(statistics),
       bind_lambda(bind_lambda), bind_expression(nullptr), get_modified_databases(nullptr), serialize(nullptr),
-      deserialize(nullptr) {
+      deserialize(nullptr), monotonicity(monotonicity_p) {
 }
 
 ScalarFunction::ScalarFunction(vector<LogicalType> arguments, LogicalType return_type, scalar_function_t function,
                                bind_scalar_function_t bind, function_statistics_t statistics,
                                init_local_state_t init_local_state, LogicalType varargs, FunctionStability side_effects,
-                               FunctionNullHandling null_handling, bind_lambda_function_t bind_lambda)
+                               FunctionNullHandling null_handling, bind_lambda_function_t bind_lambda,
+                               FunctionMonotonicity monotonicity_p)
     : ScalarFunction(string(), std::move(arguments), std::move(return_type), std::move(function), bind, statistics,
-                     init_local_state, std::move(varargs), side_effects, null_handling, bind_lambda) {
+                     init_local_state, std::move(varargs), side_effects, null_handling, bind_lambda, monotonicity_p) {
 }
 
 bool ScalarFunction::operator==(const ScalarFunction &rhs) const {
