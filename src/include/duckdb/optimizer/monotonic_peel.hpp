@@ -17,18 +17,19 @@ struct MonotonicPeelStep {
 	bool inverts;
 };
 
-//! Inspect ONE wrapper level of `expr`. On success, `step.col_arg` is the index of the
-//! column-bearing child to walk into next, and `step.inverts` is true iff this hop
-//! reverses ordering. Handles invertible casts (single child, never inverts), commutative
-//! `+` (column on either side), and any function declaring FunctionMonotonicity with all
-//! other args foldable.
+//! Inspect one wrapper level of `expr`. On success, sets `step.col_arg` to the column-bearing
+//! child to walk into and `step.inverts` if this hop reverses ordering. Handles invertible
+//! casts and any function whose ArgProperties on the unique non-foldable arg declare
+//! monotonicity.
 //!
-//! allow_finite_only=false (Tier-1): refuses functions whose annotation has
-//!   requires_finite_input=true. Use this for the structural plan-time peel — safe only
-//!   when the function is total over its entire input domain.
-//! allow_finite_only=true (Tier-2): accepts requires_finite_input functions. The caller
-//!   is responsible for a runtime safety gate (e.g. checking the folded value is non-NULL
-//!   before committing the result).
+//! `allow_finite_only`: tier-1 (false) refuses args where ArgProperties::requires_finite_input
+//! is set; tier-2 (true) accepts them, leaving null-safety to the caller.
 bool TryPeelMonotonicLevel(const Expression &expr, MonotonicPeelStep &step, bool allow_finite_only = false);
+
+//! Reference to the column-bearing child after a successful peel.
+const Expression &PeelColumnBearingChild(const Expression &expr, const MonotonicPeelStep &step);
+
+//! Move the column-bearing child out of `expr` (mutates expr).
+unique_ptr<Expression> ExtractColumnBearingChild(Expression &expr, const MonotonicPeelStep &step);
 
 } // namespace duckdb

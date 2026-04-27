@@ -562,10 +562,10 @@ struct ICUDatePart : public ICUDateFunc {
 	template <typename RESULT_TYPE = int64_t>
 	static void AddUnaryPartCodeFunctions(const string &name, ExtensionLoader &loader,
 	                                      const LogicalType &result_type = LogicalType::BIGINT,
-	                                      FunctionMonotonicity monotonicity = {}) {
+	                                      ArgProperties unary_arg0_props = {}) {
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetUnaryPartCodeFunction<timestamp_t, RESULT_TYPE>(LogicalType::TIMESTAMP_TZ, result_type));
-		set.SetMonotonicity(monotonicity);
+		set.SetUnaryArgProperties(unary_arg0_props);
 		loader.RegisterFunction(set);
 	}
 
@@ -659,7 +659,7 @@ void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 
 	// Tier-2: monotonic but may NULL on ±infinity inputs (e.g. year(infinity)=NULL).
 	// Structural peel (Tier-1) is refused; stats-fold path gates on NULL check.
-	const auto monotonic_arg0_finite = FunctionMonotonicity::Matches(0).RequireFinite();
+	const auto monotonic_arg0_finite = ArgProperties().Increasing().RequiresFinite();
 
 	//	BIGINTs
 	ICUDatePart::AddUnaryPartCodeFunctions("era", loader, LogicalType::BIGINT, monotonic_arg0_finite);

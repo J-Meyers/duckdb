@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/monotonic_peel.hpp"
 
 #include "duckdb/common/constants.hpp"
+#include "duckdb/function/arg_properties.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -27,47 +28,50 @@ bool TryPeelMonotonicLevel(const Expression &expr, MonotonicPeelStep &step, bool
 	if (fun.function.GetNullHandling() != FunctionNullHandling::DEFAULT_NULL_HANDLING) {
 		return false;
 	}
-	// `+` is commutative; per-arg metadata can't express "monotonic in either arg"
-	if (fun.function.name == "+" && fun.children.size() == 2) {
-		const bool lhs_foldable = fun.children[0]->IsFoldable();
-		const bool rhs_foldable = fun.children[1]->IsFoldable();
-		if (lhs_foldable != rhs_foldable) {
-			step.col_arg = lhs_foldable ? 1 : 0;
-			return true;
-		}
-	}
-	const auto &monotonicity = fun.function.GetMonotonicity();
-	if (!monotonicity.HasMonotonicArg()) {
+	if (!fun.function.HasArgProperties()) {
 		return false;
 	}
-	// Tier-1 (allow_finite_only=false): refuse functions that may NULL on infinity
-	if (monotonicity.requires_finite_input && !allow_finite_only) {
-		return false;
-	}
+	// find the unique non-foldable arg
 	idx_t non_foldable = DConstants::INVALID_INDEX;
 	for (idx_t i = 0; i < fun.children.size(); i++) {
 		if (fun.children[i]->IsFoldable()) {
 			continue;
 		}
 		if (non_foldable != DConstants::INVALID_INDEX) {
-			return false; // more than one non-foldable arg, e.g. col1 - col2
+			return false;
 		}
 		non_foldable = i;
 	}
 	if (non_foldable == DConstants::INVALID_INDEX) {
 		return false;
 	}
-	switch (monotonicity.GetOutputOrderForArg(non_foldable)) {
-	case FunctionOutputOrder::MATCHES_INPUT_ORDER:
-		break;
-	case FunctionOutputOrder::INVERTS_INPUT_ORDER:
+	auto &props = fun.function.GetArgProperties(non_foldable);
+	if (props.requires_finite_input && !allow_finite_only) {
+		return false;
+	}
+	if (IsMonotonicIncreasing(props.monotonicity)) {
+		// no flip
+	} else if (IsMonotonicDecreasing(props.monotonicity)) {
 		step.inverts = true;
-		break;
-	case FunctionOutputOrder::UNSPECIFIED:
+	} else {
 		return false;
 	}
 	step.col_arg = non_foldable;
 	return true;
+}
+
+const Expression &PeelColumnBearingChild(const Expression &expr, const MonotonicPeelStep &step) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		return *expr.Cast<BoundCastExpression>().child;
+	}
+	return *expr.Cast<BoundFunctionExpression>().children[step.col_arg];
+}
+
+unique_ptr<Expression> ExtractColumnBearingChild(Expression &expr, const MonotonicPeelStep &step) {
+	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
+		return std::move(expr.Cast<BoundCastExpression>().child);
+	}
+	return std::move(expr.Cast<BoundFunctionExpression>().children[step.col_arg]);
 }
 
 } // namespace duckdb

@@ -23,9 +23,8 @@ ScalarFunction::ScalarFunction(string name, vector<LogicalType> arguments, Logic
                                scalar_function_t function, bind_scalar_function_t bind,
                                function_statistics_t statistics, init_local_state_t init_local_state,
                                LogicalType varargs, FunctionStability side_effects, FunctionNullHandling null_handling,
-                               bind_lambda_function_t bind_lambda, FunctionMonotonicity monotonicity_p)
-    : SimpleFunction(std::move(name), std::move(arguments), std::move(return_type), std::move(varargs)),
-      monotonicity(monotonicity_p) {
+                               bind_lambda_function_t bind_lambda)
+    : SimpleFunction(std::move(name), std::move(arguments), std::move(return_type), std::move(varargs)) {
 	properties.stability = side_effects;
 	properties.null_handling = null_handling;
 
@@ -39,10 +38,9 @@ ScalarFunction::ScalarFunction(string name, vector<LogicalType> arguments, Logic
 ScalarFunction::ScalarFunction(vector<LogicalType> arguments, LogicalType return_type, scalar_function_t function,
                                bind_scalar_function_t bind, function_statistics_t statistics,
                                init_local_state_t init_local_state, LogicalType varargs, FunctionStability side_effects,
-                               FunctionNullHandling null_handling, bind_lambda_function_t bind_lambda,
-                               FunctionMonotonicity monotonicity_p)
+                               FunctionNullHandling null_handling, bind_lambda_function_t bind_lambda)
     : ScalarFunction(string(), std::move(arguments), std::move(return_type), std::move(function), bind, statistics,
-                     init_local_state, std::move(varargs), side_effects, null_handling, bind_lambda, monotonicity_p) {
+                     init_local_state, std::move(varargs), side_effects, null_handling, bind_lambda) {
 }
 
 bool ScalarFunction::operator==(const ScalarFunction &rhs) const {

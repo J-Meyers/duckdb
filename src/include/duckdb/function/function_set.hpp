@@ -76,10 +76,25 @@ public:
 
 	DUCKDB_API ScalarFunction GetFunctionByArguments(ClientContext &context, const vector<LogicalType> &arguments);
 
-	//! Apply the same monotonicity declaration to every overload in the set.
-	void SetMonotonicity(FunctionMonotonicity monotonicity) {
+	//! Apply the same per-arg property to every overload in the set.
+	void SetArgProperties(idx_t arg_idx, ArgProperties props) {
 		for (auto &fun : functions) {
-			fun.SetMonotonicity(monotonicity);
+			fun.SetArgProperties(arg_idx, props);
+		}
+	}
+	void SetArgProperties(const vector<ArgProperties> &props) {
+		for (auto &fun : functions) {
+			fun.SetArgProperties(props);
+		}
+	}
+	void SetUnaryArgProperties(ArgProperties props) {
+		for (auto &fun : functions) {
+			fun.SetUnaryArgProperties(props);
+		}
+	}
+	void SetCodomainBounds(const HalfOpenInterval &bounds) {
+		for (auto &fun : functions) {
+			fun.SetCodomainBounds(bounds);
 		}
 	}
 };

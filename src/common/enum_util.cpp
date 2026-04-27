@@ -121,6 +121,7 @@
 #include "duckdb/execution/physical_table_scan_enum.hpp"
 #include "duckdb/execution/reservoir_sample.hpp"
 #include "duckdb/function/aggregate_state.hpp"
+#include "duckdb/function/arg_properties.hpp"
 #include "duckdb/function/compression_function.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/function/function.hpp"
@@ -2411,25 +2412,6 @@ FunctionNullHandling EnumUtil::FromString<FunctionNullHandling>(const char *valu
 	return static_cast<FunctionNullHandling>(StringUtil::StringToEnum(GetFunctionNullHandlingValues(), 2, "FunctionNullHandling", value));
 }
 
-const StringUtil::EnumStringLiteral *GetFunctionOutputOrderValues() {
-	static constexpr StringUtil::EnumStringLiteral values[] {
-		{ static_cast<uint32_t>(FunctionOutputOrder::UNSPECIFIED), "UNSPECIFIED" },
-		{ static_cast<uint32_t>(FunctionOutputOrder::MATCHES_INPUT_ORDER), "MATCHES_INPUT_ORDER" },
-		{ static_cast<uint32_t>(FunctionOutputOrder::INVERTS_INPUT_ORDER), "INVERTS_INPUT_ORDER" }
-	};
-	return values;
-}
-
-template<>
-const char* EnumUtil::ToChars<FunctionOutputOrder>(FunctionOutputOrder value) {
-	return StringUtil::EnumToString(GetFunctionOutputOrderValues(), 3, "FunctionOutputOrder", static_cast<uint32_t>(value));
-}
-
-template<>
-FunctionOutputOrder EnumUtil::FromString<FunctionOutputOrder>(const char *value) {
-	return static_cast<FunctionOutputOrder>(StringUtil::StringToEnum(GetFunctionOutputOrderValues(), 3, "FunctionOutputOrder", value));
-}
-
 const StringUtil::EnumStringLiteral *GetFunctionStabilityValues() {
 	static constexpr StringUtil::EnumStringLiteral values[] {
 		{ static_cast<uint32_t>(FunctionStability::CONSISTENT), "CONSISTENT" },
@@ -3380,6 +3362,28 @@ const char* EnumUtil::ToChars<MetricType>(MetricType value) {
 template<>
 MetricType EnumUtil::FromString<MetricType>(const char *value) {
 	return static_cast<MetricType>(StringUtil::StringToEnum(GetMetricTypeValues(), 71, "MetricType", value));
+}
+
+const StringUtil::EnumStringLiteral *GetMonotonicityValues() {
+	static constexpr StringUtil::EnumStringLiteral values[] {
+		{ static_cast<uint32_t>(Monotonicity::UNKNOWN), "UNKNOWN" },
+		{ static_cast<uint32_t>(Monotonicity::CONSTANT), "CONSTANT" },
+		{ static_cast<uint32_t>(Monotonicity::NON_DECREASING), "NON_DECREASING" },
+		{ static_cast<uint32_t>(Monotonicity::STRICTLY_INCREASING), "STRICTLY_INCREASING" },
+		{ static_cast<uint32_t>(Monotonicity::NON_INCREASING), "NON_INCREASING" },
+		{ static_cast<uint32_t>(Monotonicity::STRICTLY_DECREASING), "STRICTLY_DECREASING" }
+	};
+	return values;
+}
+
+template<>
+const char* EnumUtil::ToChars<Monotonicity>(Monotonicity value) {
+	return StringUtil::EnumToString(GetMonotonicityValues(), 6, "Monotonicity", static_cast<uint32_t>(value));
+}
+
+template<>
+Monotonicity EnumUtil::FromString<Monotonicity>(const char *value) {
+	return static_cast<Monotonicity>(StringUtil::StringToEnum(GetMonotonicityValues(), 6, "Monotonicity", value));
 }
 
 const StringUtil::EnumStringLiteral *GetMultiFileColumnMappingModeValues() {

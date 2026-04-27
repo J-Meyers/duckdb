@@ -609,7 +609,7 @@ ScalarFunctionSet DateTruncFun::GetFunctions() {
 	                                      DateTruncFunction<interval_t, interval_t>));
 	for (auto &func : date_trunc.functions) {
 		func.SetFallible();
-		func.SetMonotonicity(FunctionMonotonicity::Matches(1));
+		func.SetArgProperties(1, ArgProperties().Increasing());
 	}
 	return date_trunc;
 }

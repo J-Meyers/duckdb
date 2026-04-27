@@ -13,6 +13,7 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/expression_executor_state.hpp"
+#include "duckdb/function/arg_properties.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -182,7 +183,7 @@ public:
 	                          LogicalType varargs = LogicalType(LogicalTypeId::INVALID),
 	                          FunctionStability stability = FunctionStability::CONSISTENT,
 	                          FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                          bind_lambda_function_t bind_lambda = nullptr, FunctionMonotonicity monotonicity = {});
+	                          bind_lambda_function_t bind_lambda = nullptr);
 
 	DUCKDB_API ScalarFunction(vector<LogicalType> arguments, LogicalType return_type, scalar_function_t function,
 	                          bind_scalar_function_t bind = nullptr, function_statistics_t statistics = nullptr,
@@ -190,7 +191,7 @@ public:
 	                          LogicalType varargs = LogicalType(LogicalTypeId::INVALID),
 	                          FunctionStability stability = FunctionStability::CONSISTENT,
 	                          FunctionNullHandling null_handling = FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                          bind_lambda_function_t bind_lambda = nullptr, FunctionMonotonicity monotonicity = {});
+	                          bind_lambda_function_t bind_lambda = nullptr);
 
 	// clang-format off
 	// Keep these on one-line for readability
@@ -240,11 +241,42 @@ public:
 	propagate_filter_t GetFilterPruneCallback() const { return callbacks.filter_prune; }
 	// clang-format on
 
-	const FunctionMonotonicity &GetMonotonicity() const {
-		return monotonicity;
+	//! Per-argument declarative properties. Returns a default ArgProperties when no annotation exists.
+	const ArgProperties &GetArgProperties(idx_t arg_idx) const {
+		static const ArgProperties unknown;
+		return arg_idx < arg_props.size() ? arg_props[arg_idx] : unknown;
 	}
-	void SetMonotonicity(FunctionMonotonicity monotonicity_p) {
-		monotonicity = monotonicity_p;
+	const vector<ArgProperties> &GetAllArgProperties() const {
+		return arg_props;
+	}
+	bool HasArgProperties() const {
+		return !arg_props.empty();
+	}
+	ScalarFunction &SetArgProperties(idx_t arg_idx, ArgProperties props) {
+		if (arg_props.size() <= arg_idx) {
+			arg_props.resize(arg_idx + 1);
+		}
+		arg_props[arg_idx] = props;
+		return *this;
+	}
+	ScalarFunction &SetArgProperties(vector<ArgProperties> props) {
+		arg_props = std::move(props);
+		return *this;
+	}
+	ScalarFunction &SetUnaryArgProperties(ArgProperties props) {
+		return SetArgProperties(0, props);
+	}
+
+	//! Function output range, regardless of input (e.g. month is in [1, 13)).
+	bool HasCodomainBounds() const {
+		return codomain_bounds.lo.type().id() != LogicalTypeId::INVALID;
+	}
+	const HalfOpenInterval &GetCodomainBounds() const {
+		return codomain_bounds;
+	}
+	ScalarFunction &SetCodomainBounds(HalfOpenInterval bounds) {
+		codomain_bounds = std::move(bounds);
+		return *this;
 	}
 
 	bool HasExtraFunctionInfo() const {
@@ -268,8 +300,11 @@ protected:
 
 	//! Additional function info, passed to the bind
 	shared_ptr<ScalarFunctionInfo> function_info;
-	//! Per-arg monotonicity declaration; default-constructed = no claims made.
-	FunctionMonotonicity monotonicity;
+	//! Per-argument declarative properties (monotonicity, injectivity,
+	//! preimage). Empty = no claims made.
+	vector<ArgProperties> arg_props;
+	//! Function-level output codomain bound; lo.type() == INVALID = unset.
+	HalfOpenInterval codomain_bounds;
 
 public:
 	// clang-format off
