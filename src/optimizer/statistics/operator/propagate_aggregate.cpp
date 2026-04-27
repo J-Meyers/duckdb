@@ -3,27 +3,22 @@
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/numeric_utils.hpp"
-#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
-#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_expression_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
-#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/statistics/string_stats.hpp"
 #include "duckdb/storage/storage_index.hpp"
@@ -77,13 +72,6 @@ unique_ptr<ValueComparator> GetComparator(const string &fun_name, const LogicalT
 	return nullptr;
 }
 
-unique_ptr<ValueComparator> FlipComparator(const string &fun_name, const LogicalType &type) {
-	D_ASSERT(fun_name == "min" || fun_name == "max");
-	// "min" → MaxValueComp, "max" → MinValueComp
-	const string flipped = (fun_name == "min") ? "max" : "min";
-	return GetComparator(flipped, type);
-}
-
 bool TryGetValueFromStats(const PartitionStatistics &stats, const StorageIndex &storage_index,
                           const ValueComparator &comparator, Value &result) {
 	if (!stats.partition_row_group) {
@@ -111,94 +99,6 @@ bool TryGetValueFromStats(const PartitionStatistics &stats, const StorageIndex &
 	return true;
 }
 
-// `+` is commutative so the column may sit at either side; per-arg metadata can't express
-// "monotonic in either arg". Returns the column-side index on success.
-bool TryPeelCommutativeAdd(const BoundFunctionExpression &fun, idx_t &target_idx) {
-	if (fun.function.name != "+" || fun.children.size() != 2) {
-		return false;
-	}
-	const bool lhs_foldable = fun.children[0]->IsFoldable();
-	const bool rhs_foldable = fun.children[1]->IsFoldable();
-	if (lhs_foldable == rhs_foldable) {
-		return false;
-	}
-	target_idx = lhs_foldable ? 1 : 0;
-	return true;
-}
-
-// Walks `expr` through invertible casts and scalar functions with declared monotonicity.
-// On success `inner_binding` holds the binding of the column ref at the bottom and
-// `inverted` is toggled for each INVERTS_INPUT_ORDER hop traversed (accumulated XOR).
-bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_binding, bool &inverted) {
-	reference<const Expression> e = expr;
-	while (true) {
-		if (e.get().type == ExpressionType::BOUND_COLUMN_REF) {
-			inner_binding = e.get().Cast<BoundColumnRefExpression>().binding;
-			return true;
-		}
-		if (e.get().GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			auto &cast = e.get().Cast<BoundCastExpression>();
-			if (!BoundCastExpression::CastIsInvertible(cast.child->return_type, cast.return_type)) {
-				return false;
-			}
-			e = *cast.child;
-			continue;
-		}
-		if (e.get().GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
-			auto &fun = e.get().Cast<BoundFunctionExpression>();
-			if (fun.function.GetStability() != FunctionStability::CONSISTENT) {
-				return false;
-			}
-			// `+` is commutative; per-arg metadata can't express "monotonic in either arg"
-			idx_t target_idx;
-			if (TryPeelCommutativeAdd(fun, target_idx)) {
-				e = *fun.children[target_idx];
-				continue;
-			}
-			const auto &monotonicity = fun.function.GetMonotonicity();
-			if (!monotonicity.HasMonotonicArg()) {
-				return false;
-			}
-			// Find the single non-foldable child; that's the column-path arg. All other args
-			// must be foldable (compile-time constants) for monotonicity to hold.
-			idx_t column_arg = DConstants::INVALID_INDEX;
-			for (idx_t i = 0; i < fun.children.size(); i++) {
-				if (fun.children[i]->IsFoldable()) {
-					continue;
-				}
-				if (column_arg != DConstants::INVALID_INDEX) {
-					return false; // more than one non-foldable arg, e.g. col1 - col2
-				}
-				column_arg = i;
-			}
-			if (column_arg == DConstants::INVALID_INDEX) {
-				return false; // entirely foldable; nothing to walk into
-			}
-			switch (monotonicity.GetOutputOrderForArg(column_arg)) {
-			case FunctionOutputOrder::MATCHES_INPUT_ORDER:
-				break;
-			case FunctionOutputOrder::INVERTS_INPUT_ORDER:
-				inverted = !inverted;
-				break;
-			case FunctionOutputOrder::UNSPECIFIED:
-				return false; // function isn't monotonic in the only column arg available
-			}
-			e = *fun.children[column_arg];
-			continue;
-		}
-		return false;
-	}
-}
-
-void SubstituteColumnRefWithConstant(unique_ptr<Expression> &expr, const Value &value) {
-	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-		expr = make_uniq<BoundConstantExpression>(value);
-		return;
-	}
-	ExpressionIterator::EnumerateChildren(
-	    *expr, [&](unique_ptr<Expression> &child) { SubstituteColumnRefWithConstant(child, value); });
-}
-
 } // namespace
 
 void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_ptr<LogicalOperator> &node_ptr) {
@@ -210,11 +110,6 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 	vector<idx_t> count_star_idxs;
 	vector<ColumnBinding> min_max_bindings;
 	vector<unique_ptr<ValueComparator>> comparators;
-	vector<string> agg_fun_names;
-	vector<LogicalType> agg_arg_types;
-	// wrapper sitting directly inside MIN/MAX (no intervening projection); seeds the chain
-	vector<unique_ptr<Expression>> agg_arg_wrappers;
-	vector<bool> wrapper_inverted; // accumulated INVERTS parity per min/max binding
 
 	for (idx_t i = 0; i < aggr.expressions.size(); i++) {
 		auto &aggr_ref = aggr.expressions[i];
@@ -229,31 +124,17 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 		}
 		const string &fun_name = aggr_expr.function.name;
 		if (fun_name == "min" || fun_name == "max") {
-			if (aggr_expr.children.size() != 1) {
+			if (aggr_expr.children.size() != 1 || aggr_expr.children[0]->type != ExpressionType::BOUND_COLUMN_REF) {
 				return;
 			}
-			auto &agg_arg = *aggr_expr.children[0];
-			ColumnBinding inner_binding;
-			bool inverted = false;
-			if (agg_arg.type == ExpressionType::BOUND_COLUMN_REF) {
-				inner_binding = agg_arg.Cast<BoundColumnRefExpression>().binding;
-				agg_arg_wrappers.emplace_back();
-			} else {
-				if (!TryExtractWrappedColumnRef(agg_arg, inner_binding, inverted)) {
-					return;
-				}
-				agg_arg_wrappers.push_back(agg_arg.Copy());
-			}
-			wrapper_inverted.push_back(inverted);
-			min_max_bindings.push_back(inner_binding);
-			auto comparator = GetComparator(fun_name, agg_arg.return_type);
+			const auto &col_ref = aggr_expr.children[0]->Cast<BoundColumnRefExpression>();
+			min_max_bindings.push_back(col_ref.binding);
+			auto comparator = GetComparator(fun_name, col_ref.return_type);
 			if (!comparator) {
 				// Type has no min max statistics
 				return;
 			}
 			comparators.push_back(std::move(comparator));
-			agg_fun_names.push_back(fun_name);
-			agg_arg_types.push_back(agg_arg.return_type);
 		} else if (fun_name == "count_star") {
 			count_star_idxs.push_back(i);
 		} else {
@@ -262,31 +143,16 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 		}
 	}
 
-	// walk projections, collecting the wrapper chain (outermost first) per binding
-	vector<vector<unique_ptr<Expression>>> wrapper_chains(min_max_bindings.size());
-	for (idx_t i = 0; i < min_max_bindings.size(); i++) {
-		if (agg_arg_wrappers[i]) {
-			wrapper_chains[i].push_back(std::move(agg_arg_wrappers[i]));
-		}
-	}
+	// skip any projections
 	reference<LogicalOperator> child_ref = *aggr.children[0];
 	while (child_ref.get().type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		for (idx_t i = 0; i < min_max_bindings.size(); i++) {
-			auto &binding = min_max_bindings[i];
+		for (auto &binding : min_max_bindings) {
 			auto &proj = child_ref.get().Cast<LogicalProjection>();
 			auto &expr = proj.GetExpression(binding);
-			if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-				binding = expr.Cast<BoundColumnRefExpression>().binding;
-				continue;
-			}
-			ColumnBinding inner_binding;
-			bool proj_inverted = false;
-			if (!TryExtractWrappedColumnRef(expr, inner_binding, proj_inverted)) {
+			if (expr.type != ExpressionType::BOUND_COLUMN_REF) {
 				return;
 			}
-			wrapper_chains[i].push_back(expr.Copy());
-			wrapper_inverted[i] = wrapper_inverted[i] ^ proj_inverted;
-			binding = inner_binding;
+			binding = expr.Cast<BoundColumnRefExpression>().binding;
 		}
 		child_ref = *child_ref.get().children[0];
 	}
@@ -385,15 +251,7 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 		// Execute min/max aggregates on partition statistics
 		for (idx_t agg_idx = 0; agg_idx < min_max_storage_indexes.size(); agg_idx++) {
 			const auto &storage_index = min_max_storage_indexes[agg_idx];
-			unique_ptr<ValueComparator> flipped_holder;
-			ValueComparator *comparator = comparators[agg_idx].get();
-			if (wrapper_inverted[agg_idx]) {
-				flipped_holder = FlipComparator(agg_fun_names[agg_idx], agg_arg_types[agg_idx]);
-				if (!flipped_holder) {
-					return;
-				}
-				comparator = flipped_holder.get();
-			}
+			auto &comparator = comparators[agg_idx];
 
 			Value agg_result;
 			if (!TryGetValueFromStats(partition_stats[0], storage_index, *comparator, agg_result)) {
@@ -407,20 +265,6 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 				if (!comparator->Compare(agg_result, rhs)) {
 					agg_result = rhs;
 				}
-			}
-			// apply wrappers innermost-first to thread the column value back up.
-			// TryEvaluateScalar swallows exceptions and returns false: a wrapper that
-			// throws on the stat value would also throw on the full scan, so falling
-			// back here is correct (slow error vs fast error), not a correctness bug.
-			auto &chain = wrapper_chains[agg_idx];
-			for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-				auto wrapper = (*it)->Copy();
-				SubstituteColumnRefWithConstant(wrapper, agg_result);
-				Value evaluated;
-				if (!ExpressionExecutor::TryEvaluateScalar(context, *wrapper, evaluated)) {
-					return;
-				}
-				agg_result = std::move(evaluated);
 			}
 			types.push_back(agg_result.GetTypeMutable());
 			auto expr = make_uniq<BoundConstantExpression>(agg_result);

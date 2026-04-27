@@ -130,3 +130,87 @@ EXPLAIN SELECT MIN(bi - (bi + 1)) FROM t
 ----
 physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
 
+# === non-stats source: rewrite peels the wrapper into a projection above ===
+# `"year"(#0)` in the plan means year() is wrapping the aggregate's output column ref —
+# proof the wrapper sits in a projection ABOVE the aggregate.
+
+statement ok
+COPY (SELECT
+  i::INTEGER AS bi,
+  DATE '2020-01-01' + INTERVAL (i) DAY AS dt
+FROM range(2048) _(i)) TO '{TEST_DIR}/peel.csv' (FORMAT CSV, HEADER 1)
+
+query II
+EXPLAIN SELECT MIN(year(dt)), MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+physical_plan	<REGEX>:.*"year"\(#0\).*
+
+query II
+SELECT MIN(year(dt)), MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+2020	2025
+
+# INVERTS arg flips MIN to MAX
+query II
+EXPLAIN SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates: max\(#0\).*
+
+query I
+SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+1606
+
+# multi-level chain: year + binary - both peel in one pass
+query II
+EXPLAIN SELECT MIN(year(dt) - 5) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+physical_plan	<REGEX>:.*"year"\(#0\).*
+
+query I
+SELECT MIN(year(dt) - 5) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+2015
+
+# partial peel: outer unary - lifts (INVERTS, flips MIN->MAX); inner month is non-peelable and stays
+query II
+EXPLAIN SELECT MIN(-month(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates: max\(#0\).*
+
+query I
+SELECT MIN(-month(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
+----
+-12
+
+# === parquet source: rewrite + stats fold compose ===
+
+require parquet
+
+statement ok
+COPY (SELECT
+  i::INTEGER AS bi,
+  DATE '2020-01-01' + INTERVAL (i) DAY AS dt
+FROM range(2048) _(i)) TO '{TEST_DIR}/peel.parquet' (FORMAT PARQUET)
+
+# full peel + stats fold: aggregate eliminated
+query II
+EXPLAIN SELECT MIN(year(dt)), MAX(year(dt)) FROM read_parquet('{TEST_DIR}/peel.parquet')
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query II
+SELECT MIN(year(dt)), MAX(year(dt)) FROM read_parquet('{TEST_DIR}/peel.parquet')
+----
+2020	2025
+
+# partial peel on parquet: aggregate stays because the inner can't fold
+query II
+EXPLAIN SELECT MIN(-month(dt)) FROM read_parquet('{TEST_DIR}/peel.parquet')
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates: max\(#0\).*
+
+query I
+SELECT MIN(-month(dt)) FROM read_parquet('{TEST_DIR}/peel.parquet')
+----
+-12
