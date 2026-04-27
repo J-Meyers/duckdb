@@ -264,18 +264,6 @@ public:
 	MonotonicPeelMatcher() : ExpressionMatcher(ExpressionClass::BOUND_AGGREGATE) {
 	}
 
-	//! Try to peel one level off `expr` using Tier-1 (structural, allow_finite_only=false).
-	//! Delegates to TryPeelMonotonicLevel; see monotonic_peel.hpp for semantics.
-	static bool TryPeelOneLevel(const Expression &expr, idx_t &col_arg, bool &inverts) {
-		MonotonicPeelStep step;
-		if (!TryPeelMonotonicLevel(expr, step, /*allow_finite_only=*/false)) {
-			return false;
-		}
-		col_arg = step.col_arg;
-		inverts = step.inverts;
-		return true;
-	}
-
 	bool Match(Expression &expr_p, vector<reference<Expression>> &bindings) override {
 		if (expr_p.GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
 			return false;
@@ -290,9 +278,8 @@ public:
 		if (aggr.IsDistinct() || aggr.filter || aggr.order_bys) {
 			return false;
 		}
-		idx_t col_arg;
-		bool inverts;
-		if (!TryPeelOneLevel(*aggr.children[0], col_arg, inverts)) {
+		MonotonicPeelStep step;
+		if (!TryPeelMonotonicLevel(*aggr.children[0], step, /*allow_finite_only=*/false)) {
 			return false;
 		}
 		bindings.push_back(expr_p);
@@ -323,18 +310,12 @@ public:
 
 		// Stash each peeled wrapper with its column slot left empty for projection rebuild.
 		while (true) {
-			idx_t col_arg;
-			bool inverts;
-			if (!MonotonicPeelMatcher::TryPeelOneLevel(*current, col_arg, inverts)) {
+			MonotonicPeelStep step;
+			if (!TryPeelMonotonicLevel(*current, step, /*allow_finite_only=*/false)) {
 				break;
 			}
-			unique_ptr<Expression> inner;
-			if (current->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-				inner = std::move(current->Cast<BoundCastExpression>().child);
-			} else {
-				inner = std::move(current->Cast<BoundFunctionExpression>().children[col_arg]);
-			}
-			if (inverts) {
+			auto inner = ExtractColumnBearingChild(*current, step);
+			if (step.inverts) {
 				inverted = !inverted;
 			}
 			additional_expressions.push_back(std::move(current));

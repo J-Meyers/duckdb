@@ -449,7 +449,9 @@ ScalarFunctionSet DateSubFun::GetFunctions() {
 	                                    LogicalType::BIGINT, DateSubFunction<timestamp_t>));
 	date_sub.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIME, LogicalType::TIME},
 	                                    LogicalType::BIGINT, DateSubFunction<dtime_t>));
-	date_sub.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1).RequireFinite());
+	// date_sub(part, start, end): output decreases with `start`, increases with `end`.
+	date_sub.SetArgProperties(1, ArgProperties().Decreasing().RequiresFinite());
+	date_sub.SetArgProperties(2, ArgProperties().Increasing().RequiresFinite());
 	return date_sub;
 }
 

@@ -129,12 +129,7 @@ bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_bin
 		if (step.inverts) {
 			inverted = !inverted;
 		}
-		// Walk into the column-bearing child
-		if (e.get().GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			e = *e.get().Cast<BoundCastExpression>().child;
-		} else {
-			e = *e.get().Cast<BoundFunctionExpression>().children[step.col_arg];
-		}
+		e = PeelColumnBearingChild(e.get(), step);
 	}
 }
 
