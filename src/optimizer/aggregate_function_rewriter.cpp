@@ -4,6 +4,7 @@
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/optimizer/matcher/expression_matcher.hpp"
+#include "duckdb/optimizer/monotonic_peel.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -263,66 +264,15 @@ public:
 	MonotonicPeelMatcher() : ExpressionMatcher(ExpressionClass::BOUND_AGGREGATE) {
 	}
 
-	//! Try to peel one level off `expr`. On success, `col_arg` is the index of the column-bearing child
-	//! to walk into next, and `inverts` is true iff this hop reverses order. Handles invertible casts
-	//! (single child, never inverts), commutative `+` (column on either side), and any function declaring
-	//! FunctionMonotonicity with all other args foldable.
+	//! Try to peel one level off `expr` using Tier-1 (structural, allow_finite_only=false).
+	//! Delegates to TryPeelMonotonicLevel; see monotonic_peel.hpp for semantics.
 	static bool TryPeelOneLevel(const Expression &expr, idx_t &col_arg, bool &inverts) {
-		inverts = false;
-		if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			auto &cast = expr.Cast<BoundCastExpression>();
-			if (!BoundCastExpression::CastIsInvertible(cast.child->return_type, cast.return_type)) {
-				return false;
-			}
-			col_arg = 0;
-			return true;
-		}
-		if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		MonotonicPeelStep step;
+		if (!TryPeelMonotonicLevel(expr, step, /*allow_finite_only=*/false)) {
 			return false;
 		}
-		auto &fun = expr.Cast<BoundFunctionExpression>();
-		if (fun.function.GetStability() != FunctionStability::CONSISTENT) {
-			return false;
-		}
-		if (fun.function.GetNullHandling() != FunctionNullHandling::DEFAULT_NULL_HANDLING) {
-			return false;
-		}
-		// `+` is commutative; per-arg metadata can't express "monotonic in either arg"
-		if (fun.function.name == "+" && fun.children.size() == 2) {
-			const bool lhs_foldable = fun.children[0]->IsFoldable();
-			const bool rhs_foldable = fun.children[1]->IsFoldable();
-			if (lhs_foldable != rhs_foldable) {
-				col_arg = lhs_foldable ? 1 : 0;
-				return true;
-			}
-		}
-		const auto &monotonicity = fun.function.GetMonotonicity();
-		if (!monotonicity.HasMonotonicArg()) {
-			return false;
-		}
-		idx_t non_foldable = DConstants::INVALID_INDEX;
-		for (idx_t i = 0; i < fun.children.size(); i++) {
-			if (fun.children[i]->IsFoldable()) {
-				continue;
-			}
-			if (non_foldable != DConstants::INVALID_INDEX) {
-				return false; // more than one non-foldable arg, e.g. col1 - col2
-			}
-			non_foldable = i;
-		}
-		if (non_foldable == DConstants::INVALID_INDEX) {
-			return false;
-		}
-		switch (monotonicity.GetOutputOrderForArg(non_foldable)) {
-		case FunctionOutputOrder::MATCHES_INPUT_ORDER:
-			break;
-		case FunctionOutputOrder::INVERTS_INPUT_ORDER:
-			inverts = true;
-			break;
-		case FunctionOutputOrder::UNSPECIFIED:
-			return false;
-		}
-		col_arg = non_foldable;
+		col_arg = step.col_arg;
+		inverts = step.inverts;
 		return true;
 	}
 

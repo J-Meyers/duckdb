@@ -60,6 +60,15 @@ enum class FunctionOutputOrder : uint8_t {
 //! and at most one INVERTS arg; the declaration only holds when all OTHER arguments
 //! are foldable. Examples: year(date) -> Matches(0); unary - -> Inverts(0);
 //! binary - -> MatchesAndInverts(0, 1); date_diff(p, s, e) -> MatchesAndInverts(2, 1).
+//!
+//! Two-tier peel model:
+//!   requires_finite_input = false (default, Tier-1): function is total over its entire input
+//!     domain — non-NULL input always gives non-NULL output. Structural peel at plan time is
+//!     safe: MAX(f(col)) -> f(MAX(col)).
+//!   requires_finite_input = true (Tier-2): function may return NULL for special values such
+//!     as ±infinity (e.g. year(infinity) = NULL). Structural peel is UNSAFE; only the
+//!     stats-fold path may use this annotation, and it must check for NULL output before
+//!     committing the folded result.
 struct FunctionMonotonicity {
 	FunctionMonotonicity() = default;
 
@@ -83,6 +92,14 @@ struct FunctionMonotonicity {
 		return m;
 	}
 
+	//! Mark this function as requiring finite (non-infinity) inputs for non-NULL output.
+	//! Tier-1 (structural) peel will refuse it; Tier-2 (stats-fold) peel accepts it
+	//! and gates on a runtime NULL check of the folded value.
+	FunctionMonotonicity &RequireFinite() {
+		requires_finite_input = true;
+		return *this;
+	}
+
 	//! True if this declaration claims monotonicity in any argument.
 	bool HasMonotonicArg() const {
 		return matches_input_arg.IsValid() || inverts_input_arg.IsValid();
@@ -101,6 +118,8 @@ struct FunctionMonotonicity {
 
 	optional_idx matches_input_arg;
 	optional_idx inverts_input_arg;
+	//! See RequireFinite(). Default false = Tier-1 safe (total over domain).
+	bool requires_finite_input = false;
 };
 
 //! How to handle collations
