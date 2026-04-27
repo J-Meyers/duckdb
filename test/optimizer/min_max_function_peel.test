@@ -267,3 +267,41 @@ query I
 SELECT MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel_inf.csv', auto_detect=true)
 ----
 2021
+
+# Mixed Tier-1 + Tier-2 on parquet: outer round (Tier-1) peels structurally; stats-fold then
+# collapses the bare MIN(year(dt)) to a constant. Both paths compose.
+query II
+EXPLAIN SELECT MIN(round(year(dt))) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MIN(round(year(dt))) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+2020.0
+
+# epoch_ms (Tier-2 extractor) folds via stats on a finite parquet timestamp column.
+statement ok
+COPY (SELECT (TIMESTAMP '2020-01-01' + INTERVAL (i) HOUR) AS ts
+      FROM range(1024) _(i)) TO '{TEST_DIR}/peel_ts.parquet' (FORMAT PARQUET)
+
+query II
+EXPLAIN SELECT MIN(epoch_ms(ts)), MAX(epoch_ms(ts)) FROM read_parquet('{TEST_DIR}/peel_ts.parquet')
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query II
+SELECT MIN(epoch_ms(ts)), MAX(epoch_ms(ts)) FROM read_parquet('{TEST_DIR}/peel_ts.parquet')
+----
+1577836800000	1581519600000
+
+# date_diff Tier-2 INVERTS arg on parquet: MAX(dt) flipped, then date_diff applied at fold time.
+query II
+EXPLAIN SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+1606
