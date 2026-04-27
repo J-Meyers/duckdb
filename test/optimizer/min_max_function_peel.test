@@ -27,7 +27,8 @@ SELECT MIN(year(dt)), MAX(year(dt)) FROM t
 ----
 2020	2025
 
-# Tier 2: literal config + monotonic column at non-zero arg index (date_diff at idx 2)
+# date_diff is Tier-2 (RequireFinite): stats-fold eliminates the aggregate for finite parquet/table data.
+# Column at non-zero arg index (date_diff at idx 2).
 query II
 EXPLAIN SELECT MIN(date_diff('day', DATE '2020-01-01', dt)) FROM t
 ----
@@ -130,9 +131,7 @@ EXPLAIN SELECT MIN(bi - (bi + 1)) FROM t
 ----
 physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
 
-# === non-stats source: rewrite peels the wrapper into a projection above ===
-# `"year"(#0)` in the plan means year() is wrapping the aggregate's output column ref —
-# proof the wrapper sits in a projection ABOVE the aggregate.
+# === non-stats source: year() is Tier-2 only, so the aggregate stays for CSV sources ===
 
 statement ok
 COPY (SELECT
@@ -140,32 +139,34 @@ COPY (SELECT
   DATE '2020-01-01' + INTERVAL (i) DAY AS dt
 FROM range(2048) _(i)) TO '{TEST_DIR}/peel.csv' (FORMAT CSV, HEADER 1)
 
+# year() is Tier-2 (RequireFinite); Tier-1 peel refuses it; CSV has no stats so aggregate stays.
 query II
 EXPLAIN SELECT MIN(year(dt)), MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
 ----
-physical_plan	<REGEX>:.*"year"\(#0\).*
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
 
 query II
 SELECT MIN(year(dt)), MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
 ----
 2020	2025
 
-# INVERTS arg flips MIN to MAX
+# date_diff is also Tier-2; for CSV the aggregate stays (no stats to fold against).
 query II
 EXPLAIN SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
 ----
-physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*Aggregates: max\(#0\).*
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
 
 query I
 SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
 ----
 1606
 
-# multi-level chain: year + binary - both peel in one pass
+# multi-level chain: outer binary - is Tier-1 peelable; inner year() is Tier-2 (stays).
+# The -5 wrapper is hoisted into a projection above MIN(year(dt)).
 query II
 EXPLAIN SELECT MIN(year(dt) - 5) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
 ----
-physical_plan	<REGEX>:.*"year"\(#0\).*
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
 
 query I
 SELECT MIN(year(dt) - 5) FROM read_csv('{TEST_DIR}/peel.csv', auto_detect=true)
@@ -214,3 +215,55 @@ query I
 SELECT MIN(-month(dt)) FROM read_parquet('{TEST_DIR}/peel.parquet')
 ----
 -12
+
+# === Tier-2 + stats-fold ===
+
+require parquet
+
+# Setup parquet table with FINITE date data — stats fold should fire for year().
+statement ok
+COPY (SELECT (DATE '2020-01-01' + INTERVAL (i) DAY)::DATE AS dt
+      FROM range(2048) _(i)) TO '{TEST_DIR}/peel_finite.parquet' (FORMAT PARQUET)
+
+# Stats fold: year(dt) over finite parquet -> aggregate eliminated, replaced by constant.
+query II
+EXPLAIN SELECT MIN(year(dt)) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+physical_plan	<!REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MIN(year(dt)) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
+----
+2020
+
+# Setup parquet table with infinity values -- stats fold must BAIL (year(infinity)=NULL).
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('2021-01-01'::DATE),
+    ('infinity'::DATE),
+    ('-infinity'::DATE)
+) tbl(dt)) TO '{TEST_DIR}/peel_inf.parquet' (FORMAT PARQUET)
+
+# Aggregate must remain (stats-fold bailed); per-row evaluation skips NULL year() outputs.
+query II
+EXPLAIN SELECT MAX(year(dt)) FROM read_parquet('{TEST_DIR}/peel_inf.parquet')
+----
+physical_plan	<REGEX>:.*UNGROUPED_AGGREGATE.*
+
+query I
+SELECT MAX(year(dt)) FROM read_parquet('{TEST_DIR}/peel_inf.parquet')
+----
+2021
+
+# Same on read_csv (no stats at all): aggregate runs, year() per row.
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('2021-01-01'::DATE),
+    ('infinity'::DATE),
+    ('-infinity'::DATE)
+) tbl(dt)) TO '{TEST_DIR}/peel_inf.csv' (FORMAT CSV, HEADER 1)
+
+query I
+SELECT MAX(year(dt)) FROM read_csv('{TEST_DIR}/peel_inf.csv', auto_detect=true)
+----
+2021

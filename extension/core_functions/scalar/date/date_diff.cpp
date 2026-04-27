@@ -452,7 +452,7 @@ ScalarFunctionSet DateDiffFun::GetFunctions() {
 	                                     LogicalType::BIGINT, DateDiffFunction<timestamp_t>));
 	date_diff.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIME, LogicalType::TIME},
 	                                     LogicalType::BIGINT, DateDiffFunction<dtime_t>));
-	date_diff.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1));
+	date_diff.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1).RequireFinite());
 	return date_diff;
 }
 

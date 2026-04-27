@@ -657,16 +657,18 @@ struct ICUDatePart : public ICUDateFunc {
 void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 	// register the individual operators
 
-	const auto monotonic_arg0 = FunctionMonotonicity::Matches(0);
+	// Tier-2: monotonic but may NULL on ±infinity inputs (e.g. year(infinity)=NULL).
+	// Structural peel (Tier-1) is refused; stats-fold path gates on NULL check.
+	const auto monotonic_arg0_finite = FunctionMonotonicity::Matches(0).RequireFinite();
 
 	//	BIGINTs
-	ICUDatePart::AddUnaryPartCodeFunctions("era", loader, LogicalType::BIGINT, monotonic_arg0);
-	ICUDatePart::AddUnaryPartCodeFunctions("year", loader, LogicalType::BIGINT, monotonic_arg0);
+	ICUDatePart::AddUnaryPartCodeFunctions("era", loader, LogicalType::BIGINT, monotonic_arg0_finite);
+	ICUDatePart::AddUnaryPartCodeFunctions("year", loader, LogicalType::BIGINT, monotonic_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("month", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("day", loader);
-	ICUDatePart::AddUnaryPartCodeFunctions("decade", loader, LogicalType::BIGINT, monotonic_arg0);
-	ICUDatePart::AddUnaryPartCodeFunctions("century", loader, LogicalType::BIGINT, monotonic_arg0);
-	ICUDatePart::AddUnaryPartCodeFunctions("millennium", loader, LogicalType::BIGINT, monotonic_arg0);
+	ICUDatePart::AddUnaryPartCodeFunctions("decade", loader, LogicalType::BIGINT, monotonic_arg0_finite);
+	ICUDatePart::AddUnaryPartCodeFunctions("century", loader, LogicalType::BIGINT, monotonic_arg0_finite);
+	ICUDatePart::AddUnaryPartCodeFunctions("millennium", loader, LogicalType::BIGINT, monotonic_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("microsecond", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("millisecond", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("second", loader);
@@ -677,7 +679,7 @@ void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 	ICUDatePart::AddUnaryPartCodeFunctions("week", loader); //  Note that WeekOperator is ISO-8601, not US
 	ICUDatePart::AddUnaryPartCodeFunctions("dayofyear", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("quarter", loader);
-	ICUDatePart::AddUnaryPartCodeFunctions("isoyear", loader, LogicalType::BIGINT, monotonic_arg0);
+	ICUDatePart::AddUnaryPartCodeFunctions("isoyear", loader, LogicalType::BIGINT, monotonic_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("timezone", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("timezone_hour", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("timezone_minute", loader);
@@ -688,7 +690,7 @@ void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 
 	//  register combinations
 	ICUDatePart::AddUnaryPartCodeFunctions("yearweek", loader, LogicalType::BIGINT,
-	                                       monotonic_arg0); //  Note this is ISO year and week
+	                                       monotonic_arg0_finite); //  Note this is ISO year and week
 
 	//  register various aliases
 	ICUDatePart::AddUnaryPartCodeFunctions("dayofmonth", loader);

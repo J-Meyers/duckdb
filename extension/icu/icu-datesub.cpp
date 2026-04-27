@@ -139,7 +139,7 @@ struct ICUCalendarSub : public ICUDateFunc {
 	static void AddFunctions(const string &name, ExtensionLoader &loader) {
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
-		set.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1));
+		set.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1).RequireFinite());
 		loader.RegisterFunction(set);
 	}
 };
@@ -273,7 +273,7 @@ struct ICUCalendarDiff : public ICUDateFunc {
 	static void AddFunctions(const string &name, ExtensionLoader &loader) {
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
-		set.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1));
+		set.SetMonotonicity(FunctionMonotonicity::MatchesAndInverts(2, 1).RequireFinite());
 		loader.RegisterFunction(set);
 	}
 };
