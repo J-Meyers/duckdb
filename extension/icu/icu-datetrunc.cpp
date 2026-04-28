@@ -172,7 +172,8 @@ struct ICUDateTrunc : public ICUDateFunc {
 	static void AddBinaryTimestampFunction(const string &name, ExtensionLoader &loader) {
 		ScalarFunctionSet set(name);
 		set.AddFunction(GetDateTruncFunction<timestamp_t>(LogicalType::TIMESTAMP_TZ));
-		set.SetArgProperties(1, ArgProperties().Increasing());
+		// date_trunc is non-decreasing (bucket-many-to-one).
+		set.SetArgProperties(1, ArgProperties().Increasing(false));
 		loader.RegisterFunction(set);
 	}
 };

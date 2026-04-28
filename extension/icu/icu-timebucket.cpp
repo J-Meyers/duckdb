@@ -623,7 +623,8 @@ struct ICUTimeBucket : public ICUDateFunc {
 		                               LogicalType::TIMESTAMP_TZ, ICUTimeBucketTimeZoneFunction, Bind));
 		for (auto &func : set.functions) {
 			func.SetFallible();
-			func.SetArgProperties(1, ArgProperties().Increasing());
+			// time_bucket is non-decreasing (bucket-many-to-one).
+			func.SetArgProperties(1, ArgProperties().Increasing(false));
 		}
 		loader.RegisterFunction(set);
 	}
