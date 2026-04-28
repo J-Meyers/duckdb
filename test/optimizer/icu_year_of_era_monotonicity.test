@@ -1,0 +1,253 @@
+# name: test/optimizer/icu_year_of_era_monotonicity.test
+# description: ICU year/decade advertise non-decreasing monotonicity for the stats-
+# group: [optimizer]
+
+#              propagation pipeline, but UCAL_YEAR is year-of-era: positive in both
+#              BC and AD, so the value decreases as ts moves forward through BC and
+#              increases after the BC->AD flip. The refiner must reject mixed-era
+#              ranges, and bail on non-finite (+/-infinity) bounds. era / century /
+#              millennium / isoyear / yearweek encode the era and stay monotonic
+#              across BC/AD without a refiner.
+
+require icu
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+SET Calendar = 'gregorian'
+
+statement ok
+SET TimeZone = 'America/Los_Angeles'
+
+# === AD-only: refiner returns NON_DECREASING; propagator forwards correct stats ===
+
+statement ok
+CREATE TABLE ad(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO ad VALUES
+    ('1962-07-31 12:20:48+00'),
+    ('2001-04-20 14:42:11+00'),
+    ('2021-12-01 13:54:48+00')
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM ad
+----
+1962	2021
+
+query II
+SELECT MIN(decade(ts)), MAX(decade(ts)) FROM ad
+----
+196	202
+
+query II
+SELECT MIN(isoyear(ts)), MAX(isoyear(ts)) FROM ad
+----
+1962	2021
+
+query II
+SELECT MIN(yearweek(ts)), MAX(yearweek(ts)) FROM ad
+----
+196231	202148
+
+# Bare projection through the propagator path - verification compares actual values
+# against the propagated stats. Must not crash.
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts), isoyear(ts), yearweek(ts) FROM ad)
+----
+3
+
+# === BC-only: refiner returns NON_INCREASING; propagator swaps lo/hi ===
+
+statement ok
+CREATE TABLE bc(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO bc VALUES
+    ('1001-03-15 (BC) 20:38:40+00'),
+    ('0500-06-01 (BC) 12:00:00+00'),
+    ('0044-03-15 (BC) 20:38:40+00')
+
+# year(BC 1001)=1001, year(BC 500)=500, year(BC 44)=44 - decreasing as ts increases
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM bc
+----
+44	1001
+
+query II
+SELECT MIN(decade(ts)), MAX(decade(ts)) FROM bc
+----
+4	100
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts), isoyear(ts), yearweek(ts) FROM bc)
+----
+3
+
+# === BC/AD mixed: refiner returns UNKNOWN; propagator must bail ===
+# This is the test_icu_makedate.test:60 shape - propagator-derived stats would
+# bracket [year(min(ts)), year(max(ts))] = [year(BC 1001)=1001, year(AD 2021)=2021]
+# which excludes the actual minimum year(BC 44)=44.
+
+statement ok
+CREATE TABLE mixed(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO mixed VALUES
+    ('1001-03-15 (BC) 20:38:40+00'),
+    ('0044-03-15 (BC) 20:38:40+00'),
+    ('1962-07-31 12:20:48+00'),
+    ('2021-12-01 13:54:48+00')
+
+# MIN(year(ts)) = 44 (from BC 44), MAX(year(ts)) = 2021 (from AD 2021)
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM mixed
+----
+44	2021
+
+query II
+SELECT MIN(decade(ts)), MAX(decade(ts)) FROM mixed
+----
+4	202
+
+# isoyear is signed for BC (UCAL_YEAR_WOY), so monotonic across BC/AD without a refiner.
+query II
+SELECT MIN(isoyear(ts)), MAX(isoyear(ts)) FROM mixed
+----
+-1000	2021
+
+# Bare projection - this is the regression that originally crashed verification.
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts), isoyear(ts), yearweek(ts) FROM mixed)
+----
+4
+
+# === +infinity included: corner eval returns NULL; propagator bails ===
+
+statement ok
+CREATE TABLE pos_inf(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO pos_inf VALUES
+    ('1962-07-31 12:20:48+00'),
+    ('2021-12-01 13:54:48+00'),
+    ('infinity'::TIMESTAMPTZ)
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM pos_inf
+----
+1962	2021
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts) FROM pos_inf)
+----
+3
+
+# === -infinity included: corner eval returns NULL; propagator bails ===
+
+statement ok
+CREATE TABLE neg_inf(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO neg_inf VALUES
+    ('-infinity'::TIMESTAMPTZ),
+    ('1962-07-31 12:20:48+00'),
+    ('2021-12-01 13:54:48+00')
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM neg_inf
+----
+1962	2021
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts) FROM neg_inf)
+----
+3
+
+# === Both -infinity and +infinity: bail on either bound being non-finite ===
+
+statement ok
+CREATE TABLE both_inf(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO both_inf VALUES
+    ('-infinity'::TIMESTAMPTZ),
+    ('1962-07-31 12:20:48+00'),
+    ('2021-12-01 13:54:48+00'),
+    ('infinity'::TIMESTAMPTZ)
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM both_inf
+----
+1962	2021
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts), isoyear(ts), yearweek(ts) FROM both_inf)
+----
+4
+
+# === -infinity straddling BC and AD: must still bail (refiner not reached, IsFinite check first) ===
+
+statement ok
+CREATE TABLE neg_inf_mixed(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO neg_inf_mixed VALUES
+    ('-infinity'::TIMESTAMPTZ),
+    ('0044-03-15 (BC) 20:38:40+00'),
+    ('2021-12-01 13:54:48+00')
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM neg_inf_mixed
+----
+44	2021
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts) FROM neg_inf_mixed)
+----
+3
+
+# === NULLs alongside finite values are fine (NULL handled separately by stats) ===
+
+statement ok
+CREATE TABLE with_null(ts TIMESTAMPTZ)
+
+statement ok
+INSERT INTO with_null VALUES
+    (NULL),
+    ('1962-07-31 12:20:48+00'),
+    ('2021-12-01 13:54:48+00')
+
+query II
+SELECT MIN(year(ts)), MAX(year(ts)) FROM with_null
+----
+1962	2021
+
+query I
+SELECT count(*) FROM (SELECT year(ts), decade(ts), isoyear(ts), yearweek(ts) FROM with_null)
+----
+3
+
+# === era/century/millennium are monotonic across BC/AD without a refiner ===
+# era goes 0 (BC) -> 1 (AD); century and millennium negate by era inside the adapter.
+
+query II
+SELECT MIN(era(ts)), MAX(era(ts)) FROM mixed
+----
+0	1
+
+query II
+SELECT MIN(century(ts)), MAX(century(ts)) FROM mixed
+----
+-11	21
+
+query II
+SELECT MIN(millennium(ts)), MAX(millennium(ts)) FROM mixed
+----
+-2	3
+
+query I
+SELECT count(*) FROM (SELECT era(ts), century(ts), millennium(ts) FROM mixed)
+----
+4

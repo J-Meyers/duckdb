@@ -654,20 +654,65 @@ struct ICUDatePart : public ICUDateFunc {
 	}
 };
 
+// year/decade return UCAL_YEAR (year-of-era): always positive in both BC and AD, so
+// the value DECREASES as ts moves forward through BC and then INCREASES after the
+// BC→AD flip. Monotonic only inside a single era. The refiner checks the lo/hi era;
+// a mixed range yields UNKNOWN, which makes the propagator bail.
+// (isoyear/yearweek use UCAL_YEAR_WOY, which is signed — negative for BC — so those
+// are monotonic across BC/AD without a refiner.)
+static Monotonicity ICUYearOfEraMonotonicityRefiner(const BoundFunctionExpression &expr, idx_t arg_idx, const Value &lo,
+                                                    const Value &hi) {
+	if (lo.IsNull() || hi.IsNull() || !expr.bind_info) {
+		return Monotonicity::UNKNOWN;
+	}
+	auto &bind_data = expr.bind_info->Cast<ICUDateFunc::BindData>();
+	if (!bind_data.calendar) {
+		return Monotonicity::UNKNOWN;
+	}
+	timestamp_t lo_ts = TimestampTZValue::Get(lo);
+	timestamp_t hi_ts = TimestampTZValue::Get(hi);
+	if (!Timestamp::IsFinite(lo_ts) || !Timestamp::IsFinite(hi_ts)) {
+		return Monotonicity::UNKNOWN;
+	}
+	CalendarPtr calendar_ptr(bind_data.calendar->clone());
+	auto *calendar = calendar_ptr.get();
+	int32_t lo_era;
+	int32_t hi_era;
+	try {
+		ICUDateFunc::SetTime(calendar, lo_ts);
+		lo_era = ICUDateFunc::ExtractField(calendar, UCAL_ERA);
+		ICUDateFunc::SetTime(calendar, hi_ts);
+		hi_era = ICUDateFunc::ExtractField(calendar, UCAL_ERA);
+	} catch (...) {
+		return Monotonicity::UNKNOWN;
+	}
+	if (lo_era != hi_era) {
+		return Monotonicity::UNKNOWN;
+	}
+	// UCAL_ERA: 0 = BC, 1 = AD. Inside BC the year-of-era counts down toward the AD flip.
+	return lo_era == 1 ? Monotonicity::NON_DECREASING : Monotonicity::NON_INCREASING;
+}
+
 void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 	// register the individual operators
 
 	// Tier-2: monotonic but may NULL on ±infinity inputs (e.g. year(infinity)=NULL).
 	// Structural peel (Tier-1) is refused; stats-fold path gates on NULL check.
-	// year/decade/century/millennium are non-decreasing (multiple dates → same year, etc.).
+	// era/century/millennium are non-decreasing across BC/AD (era is 0/1, century and
+	// millennium negate by era inside their adapters). isoyear/yearweek use
+	// UCAL_YEAR_WOY which is signed — negative for BC — so those are monotonic across
+	// BC/AD without a refiner. year/decade use UCAL_YEAR (positive year-of-era) and
+	// need the refiner above to reject BC/AD mixed ranges.
 	const auto monotonic_arg0_finite = ArgProperties().Increasing(false).RequiresFinite();
+	const auto year_of_era_arg0_finite =
+	    ArgProperties().Increasing(false).RequiresFinite().WithMonotonicityRefiner(ICUYearOfEraMonotonicityRefiner);
 
 	//	BIGINTs
 	ICUDatePart::AddUnaryPartCodeFunctions("era", loader, LogicalType::BIGINT, monotonic_arg0_finite);
-	ICUDatePart::AddUnaryPartCodeFunctions("year", loader, LogicalType::BIGINT, monotonic_arg0_finite);
+	ICUDatePart::AddUnaryPartCodeFunctions("year", loader, LogicalType::BIGINT, year_of_era_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("month", loader);
 	ICUDatePart::AddUnaryPartCodeFunctions("day", loader);
-	ICUDatePart::AddUnaryPartCodeFunctions("decade", loader, LogicalType::BIGINT, monotonic_arg0_finite);
+	ICUDatePart::AddUnaryPartCodeFunctions("decade", loader, LogicalType::BIGINT, year_of_era_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("century", loader, LogicalType::BIGINT, monotonic_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("millennium", loader, LogicalType::BIGINT, monotonic_arg0_finite);
 	ICUDatePart::AddUnaryPartCodeFunctions("microsecond", loader);
