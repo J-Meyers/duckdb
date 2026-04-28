@@ -305,3 +305,23 @@ query I
 SELECT MIN(date_diff('day', dt, DATE '2030-01-01')) FROM read_parquet('{TEST_DIR}/peel_finite.parquet')
 ----
 1606
+
+# Anti-tests: '+'/'-' overloads where the propagator must NOT claim monotonicity.
+# DATE +/- TIMETZ -> TIMESTAMPTZ orders the result in UTC, but TIMETZ ordering is not
+# UTC-instant ordering, so corner-eval picks the wrong extremum. TIME / TIMETZ +/- INTERVAL
+# wraps modulo 24h. enable_verification catches a bad annotation as a stats mismatch.
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE peel_dz AS
+SELECT * FROM (VALUES (DATE '2022-01-01', '00:01:20+00'::TIMETZ, '20:00:00'::TIME),
+                      (DATE '0044-03-15 (BC)', '20:08:10.001-15:59'::TIMETZ, '01:00:00'::TIME),
+                      (NULL, '20:08:10.998-07'::TIMETZ, NULL)) tbl(d, z, t)
+
+query I
+SELECT count(a.d + b.z) + count(a.z + b.d) + count(a.t + INTERVAL '5 hours') + count(a.t - INTERVAL '5 hours')
+     + count(a.z + INTERVAL '5 hours') + count(a.z - INTERVAL '5 hours')
+FROM peel_dz a, peel_dz b
+----
+42

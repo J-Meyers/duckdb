@@ -528,9 +528,23 @@ ScalarFunctionSet OperatorAddFun::GetFunctions() {
 	// we can add bignums together
 	add.AddFunction(AddFunction::GetFunction(LogicalType::BIGNUM, LogicalType::BIGNUM));
 
-	// `+` is monotonically non-decreasing in every argument.
+	// `+` is monotonically non-decreasing in every argument, EXCEPT when the operand or result
+	// is TIME / TIME_TZ. TIME and TIME_TZ wrap modulo 24h (e.g. 23:00 + INTERVAL '5 hours' = 04:00),
+	// and DATE + TIME_TZ -> TIMESTAMP_TZ orders the output in UTC while TIME_TZ ordering does not
+	// agree with UTC instant ordering, so corner-evaluation through the propagator picks the wrong
+	// extremum.
+	const auto involves_time = [](const LogicalType &t) {
+		return t.id() == LogicalTypeId::TIME || t.id() == LogicalTypeId::TIME_TZ;
+	};
 	for (auto &fun : add.functions) {
-		const auto arity = fun.GetArguments().size();
+		if (involves_time(fun.GetReturnType())) {
+			continue;
+		}
+		const auto &args = fun.GetArguments();
+		if (std::any_of(args.begin(), args.end(), involves_time)) {
+			continue;
+		}
+		const auto arity = args.size();
 		if (arity == 1) {
 			fun.SetUnaryArgProperties(ArgProperties().Increasing());
 		} else if (arity == 2) {
@@ -752,7 +766,8 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::TIME,
 			                        ScalarFunction::BinaryFunction<dtime_t, interval_t, dtime_t, SubtractTimeOperator>);
 			function.SetFallible();
-			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties().Decreasing()});
+			// TIME - INTERVAL wraps modulo 24h (e.g. 04:00 - INTERVAL '5 hours' = 23:00), so monotonicity
+			// in either argument does not hold.
 			return function;
 		}
 		break;
@@ -762,7 +777,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    "-", {left_type, right_type}, LogicalType::TIME_TZ,
 			    ScalarFunction::BinaryFunction<dtime_tz_t, interval_t, dtime_tz_t, SubtractTimeOperator>);
 			function.SetFallible();
-			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties().Decreasing()});
+			// TIME_TZ - INTERVAL wraps modulo 24h, same reasoning as TIME above.
 			return function;
 		}
 		break;
