@@ -101,6 +101,18 @@ SELECT s.min, s.max FROM (SELECT STATS(ABS(i)) s FROM integers LIMIT 1)
 ----
 1	10
 
+# negate: i in [-10, -1] -> -i in [1, 10]
+query II
+SELECT s.min, s.max FROM (SELECT STATS(-i) s FROM integers LIMIT 1)
+----
+1	10
+
+# impossible filter folds away
+query II
+EXPLAIN SELECT count(*) FROM integers WHERE -i < 0;
+----
+logical_opt	<REGEX>:.*EMPTY_RESULT.*
+
 # floor: non-decreasing, x in [1.5, 9.7] -> floor(x) in [1.0, 9.0]
 statement ok
 CREATE TABLE doubles(x DOUBLE);
