@@ -639,63 +639,6 @@ static unique_ptr<FunctionData> IntegerNegateBind(BindScalarFunctionInput &input
 	return nullptr;
 }
 
-struct NegatePropagateStatistics {
-	template <class T>
-	static bool Operation(const LogicalType &type, BaseStatistics &istats, Value &new_min, Value &new_max) {
-		auto max_value = NumericStats::GetMax<T>(istats);
-		auto min_value = NumericStats::GetMin<T>(istats);
-		if (!NegateOperator::CanNegate<T>(min_value) || !NegateOperator::CanNegate<T>(max_value)) {
-			return true;
-		}
-		// new min is -max
-		new_min = Value::Numeric(type, NegateOperator::Operation<T, T>(max_value));
-		// new max is -min
-		new_max = Value::Numeric(type, NegateOperator::Operation<T, T>(min_value));
-		return false;
-	}
-};
-
-static unique_ptr<BaseStatistics> NegateBindStatistics(ClientContext &context, FunctionStatisticsInput &input) {
-	auto &child_stats = input.child_stats;
-	auto &expr = input.expr;
-	D_ASSERT(child_stats.size() == 1);
-	// can only propagate stats if the children have stats
-	auto &istats = child_stats[0];
-	Value new_min, new_max;
-	bool potential_overflow = true;
-	if (NumericStats::HasMinMax(istats)) {
-		switch (expr.return_type.InternalType()) {
-		case PhysicalType::INT8:
-			potential_overflow =
-			    NegatePropagateStatistics::Operation<int8_t>(expr.return_type, istats, new_min, new_max);
-			break;
-		case PhysicalType::INT16:
-			potential_overflow =
-			    NegatePropagateStatistics::Operation<int16_t>(expr.return_type, istats, new_min, new_max);
-			break;
-		case PhysicalType::INT32:
-			potential_overflow =
-			    NegatePropagateStatistics::Operation<int32_t>(expr.return_type, istats, new_min, new_max);
-			break;
-		case PhysicalType::INT64:
-			potential_overflow =
-			    NegatePropagateStatistics::Operation<int64_t>(expr.return_type, istats, new_min, new_max);
-			break;
-		default:
-			return nullptr;
-		}
-	}
-	if (potential_overflow) {
-		new_min = Value(expr.return_type);
-		new_max = Value(expr.return_type);
-	}
-	auto stats = NumericStats::CreateEmpty(expr.return_type);
-	NumericStats::SetMin(stats, new_min);
-	NumericStats::SetMax(stats, new_max);
-	stats.CopyValidity(istats);
-	return stats.ToUnique();
-}
-
 ScalarFunction SubtractFunction::GetFunction(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::INTERVAL) {
 		ScalarFunction func("-", {type}, type, ScalarFunction::UnaryFunction<interval_t, interval_t, NegateOperator>);
@@ -703,7 +646,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &type) {
 		func.SetUnaryArgProperties(ArgProperties().Decreasing());
 		return func;
 	} else if (type.id() == LogicalTypeId::DECIMAL) {
-		ScalarFunction func("-", {type}, type, nullptr, DecimalNegateBind, NegateBindStatistics);
+		ScalarFunction func("-", {type}, type, nullptr, DecimalNegateBind);
 		func.SetUnaryArgProperties(ArgProperties().Decreasing());
 		return func;
 	} else if (type.id() == LogicalTypeId::BIGNUM) {
@@ -713,7 +656,7 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &type) {
 	} else {
 		D_ASSERT(type.IsNumeric());
 		ScalarFunction func("-", {type}, type, ScalarFunction::GetScalarUnaryFunction<NegateOperator>(type),
-		                    IntegerNegateBind, NegateBindStatistics);
+		                    IntegerNegateBind);
 		func.SetFallible();
 		func.SetUnaryArgProperties(ArgProperties().Decreasing());
 		return func;
