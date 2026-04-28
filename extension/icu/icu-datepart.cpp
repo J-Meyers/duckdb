@@ -659,7 +659,8 @@ void RegisterICUDatePartFunctions(ExtensionLoader &loader) {
 
 	// Tier-2: monotonic but may NULL on ±infinity inputs (e.g. year(infinity)=NULL).
 	// Structural peel (Tier-1) is refused; stats-fold path gates on NULL check.
-	const auto monotonic_arg0_finite = ArgProperties().Increasing().RequiresFinite();
+	// year/decade/century/millennium are non-decreasing (multiple dates → same year, etc.).
+	const auto monotonic_arg0_finite = ArgProperties().Increasing(false).RequiresFinite();
 
 	//	BIGINTs
 	ICUDatePart::AddUnaryPartCodeFunctions("era", loader, LogicalType::BIGINT, monotonic_arg0_finite);

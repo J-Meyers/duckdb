@@ -427,7 +427,8 @@ ScalarFunctionSet CeilFun::GetFunctions() {
 		}
 		ceil.AddFunction(ScalarFunction({type}, type, func, bind_func));
 	}
-	ceil.SetUnaryArgProperties(ArgProperties().Increasing());
+	// ceil is non-decreasing (multiple inputs in the same integer slot).
+	ceil.SetUnaryArgProperties(ArgProperties().Increasing(false));
 	return ceil;
 }
 
@@ -483,7 +484,8 @@ ScalarFunctionSet FloorFun::GetFunctions() {
 		}
 		floor.AddFunction(ScalarFunction({type}, type, func, bind_func));
 	}
-	floor.SetUnaryArgProperties(ArgProperties().Increasing());
+	// floor is non-decreasing (multiple inputs in the same integer slot).
+	floor.SetUnaryArgProperties(ArgProperties().Increasing(false));
 	return floor;
 }
 
@@ -752,7 +754,8 @@ ScalarFunctionSet TruncFun::GetFunctions() {
 		trunc.AddFunction(ScalarFunction({type}, type, trunc_func, bind_func));
 		trunc.AddFunction(ScalarFunction({type, LogicalType::INTEGER}, type, trunc_prec_func, bind_prec_func));
 	}
-	trunc.SetUnaryArgProperties(ArgProperties().Increasing());
+	// trunc is non-decreasing (multiple inputs in the same integer slot).
+	trunc.SetUnaryArgProperties(ArgProperties().Increasing(false));
 	return trunc;
 }
 
@@ -944,7 +947,8 @@ ScalarFunctionSet RoundFun::GetFunctions() {
 		round.AddFunction(ScalarFunction({type}, type, round_func, bind_func));
 		round.AddFunction(ScalarFunction({type, LogicalType::INTEGER}, type, round_prec_func, bind_prec_func));
 	}
-	round.SetUnaryArgProperties(ArgProperties().Increasing());
+	// round is non-decreasing (multiple inputs round to the same target).
+	round.SetUnaryArgProperties(ArgProperties().Increasing(false));
 	return round;
 }
 
