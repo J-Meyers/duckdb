@@ -50,12 +50,22 @@ struct ArgProperties {
 	                                                const Value &output_point);
 	PreimageFn preimage = nullptr;
 
+	//! Strict monotonicity in this arg implies injectivity in this arg (held-other-args fixed):
+	//! a < b => f(a) < f(b) means f never collapses distinct sources, so it's order-preserving and
+	//! one-to-one. Set both fields when strict so consumers like distinct-count propagation see
+	//! the truth without each call site having to remember to chain `.Injective()`.
 	ArgProperties &Increasing(bool strict = true) {
 		monotonicity = strict ? Monotonicity::STRICTLY_INCREASING : Monotonicity::NON_DECREASING;
+		if (strict) {
+			injective = true;
+		}
 		return *this;
 	}
 	ArgProperties &Decreasing(bool strict = true) {
 		monotonicity = strict ? Monotonicity::STRICTLY_DECREASING : Monotonicity::NON_INCREASING;
+		if (strict) {
+			injective = true;
+		}
 		return *this;
 	}
 	ArgProperties &Constant() {

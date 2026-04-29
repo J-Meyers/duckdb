@@ -397,17 +397,59 @@ SELECT MIN(epoch(v)), epoch(MIN(v)) FROM peel_ttz
 ----
 39600.0	39600.0
 
-# === Minimal S5: invertible cast peel (BIGINT widen) — both sides agree ===
+# === Cast metadata path: numeric same-signedness widening (strict + injective) ===
 statement ok
-CREATE TABLE peel_cast (i32 INTEGER)
+CREATE TABLE peel_cast (i32 INTEGER, dt DATE, ts TIMESTAMP, dec DECIMAL(5,2))
 
 statement ok
-INSERT INTO peel_cast VALUES (1), (5), (3), (NULL)
+INSERT INTO peel_cast VALUES (1, DATE '2020-01-01', TIMESTAMP '2020-01-01 12:00', 12.34),
+                             (5, DATE '2020-01-05', TIMESTAMP '2020-01-05 13:00', 56.78),
+                             (3, DATE '2020-01-03', TIMESTAMP '2020-01-03 14:00', 34.56),
+                             (NULL, NULL, NULL, NULL)
 
 query I
 SELECT MIN(i32::BIGINT) FROM peel_cast
 ----
 1
+
+# DATE -> VARCHAR: zero-padded ISO 8601 lex order matches date order.
+query I
+SELECT MIN(dt::VARCHAR) FROM peel_cast
+----
+2020-01-01
+
+# TIMESTAMP -> DATE truncation: NON_DECREASING; peel still allowed.
+query I
+SELECT MIN(ts::DATE) FROM peel_cast
+----
+2020-01-01
+
+# TIMESTAMP -> TIMESTAMP_NS widening: strict.
+query I
+SELECT MIN(ts::TIMESTAMP_NS) FROM peel_cast
+----
+2020-01-01 12:00:00
+
+# DECIMAL -> DECIMAL with non-decreasing scale: order-preserving.
+query I
+SELECT MIN(dec::DECIMAL(7,4)) FROM peel_cast
+----
+12.3400
+
+# === try_cast must NOT peel: NULL-set divergence under MIN's NULL-skipping ===
+# Construct a varchar column where the lex-MIN row is the one whose try_cast yields NULL.
+statement ok
+CREATE TABLE peel_trycast (s VARCHAR)
+
+statement ok
+INSERT INTO peel_trycast VALUES ('!!!garbage'), ('2024-01-01'), ('2024-06-15')
+
+# Un-peeled: try_cast(garbage) -> NULL skipped; MIN over {2024-01-01, 2024-06-15} = 2024-01-01.
+# If peeled: MIN(s) lex = '!!!garbage' (since '!' < '2'), try_cast -> NULL. Different result.
+query I
+SELECT MIN(TRY_CAST(s AS DATE)) FROM peel_trycast
+----
+2024-01-01
 
 # === Minimal S5: empty-input MIN/MAX through wrapper returns NULL ===
 statement ok

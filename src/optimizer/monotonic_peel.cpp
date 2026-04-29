@@ -12,7 +12,20 @@ bool TryPeelMonotonicLevel(const Expression &expr, MonotonicPeelStep &step, bool
 	step.inverts = false;
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 		auto &cast = expr.Cast<BoundCastExpression>();
-		if (!BoundCastExpression::CastIsInvertible(cast.child->GetReturnType(), cast.GetReturnType())) {
+		// try_cast turns failures into NULLs, which changes the NULL-set across the rewrite —
+		// MIN's NULL-skipping then picks a different row in the peeled vs un-peeled query.
+		if (cast.try_cast) {
+			return false;
+		}
+		auto &props = cast.bound_cast.GetArgProperties();
+		if (props.requires_finite_input && !allow_finite_only) {
+			return false;
+		}
+		if (IsMonotonicIncreasing(props.monotonicity)) {
+			// no flip
+		} else if (IsMonotonicDecreasing(props.monotonicity)) {
+			step.inverts = true;
+		} else {
 			return false;
 		}
 		step.col_arg = 0;

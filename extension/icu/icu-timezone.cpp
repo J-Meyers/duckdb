@@ -180,6 +180,11 @@ struct ICUFromNaiveTimestamp : public ICUDateFunc {
 		}
 
 		auto cast_data = make_uniq<CastData>(make_uniq<BindData>(*input.context));
+		// Note: ICU naive<->TZ casts depend on session zone and DST transitions. Two distinct
+		// naive timestamps in a "spring-forward" gap can fail to map to a UTC instant or map
+		// non-monotonically; for "fall-back" hours, two distinct UTC instants can render to the
+		// same naive timestamp. Leave arg_properties UNKNOWN so the peel and stats propagation
+		// don't fire on these.
 		switch (source.id()) {
 		case LogicalTypeId::TIMESTAMP:
 			return BoundCastInfo(CastFromNaive<CastTimestampUsToUs>, std::move(cast_data));
@@ -278,6 +283,8 @@ struct ICUToNaiveTimestamp : public ICUDateFunc {
 		}
 
 		auto cast_data = make_uniq<CastData>(make_uniq<BindData>(*input.context));
+		// Note: see BindCastFromNaive — DST transitions break monotonicity (fall-back hour
+		// renders distinct UTC instants to the same naive timestamp). Leave UNKNOWN.
 		switch (target.id()) {
 		case LogicalTypeId::TIMESTAMP:
 			return BoundCastInfo(CastToNaive<CastTimestampUsToUs>, std::move(cast_data));

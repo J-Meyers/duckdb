@@ -205,7 +205,48 @@ unique_ptr<BaseStatistics> StatisticsPropagator::PropagateExpression(BoundCastEx
 	if (!child_stats) {
 		return nullptr;
 	}
-	auto result_stats = TryPropagateCast(*child_stats, cast.child->GetReturnType(), cast.GetReturnType());
+	auto &source = cast.child->GetReturnType();
+	auto &target = cast.GetReturnType();
+
+	// VARIANT source goes through the shredded-stats path (still uses the type-pair allowlist).
+	if (source.id() == LogicalTypeId::VARIANT) {
+		auto result = StatisticsPropagateVariant(*child_stats, target);
+		if (cast.try_cast && result) {
+			result->Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+		}
+		return result;
+	}
+
+	// Identity casts (source == target) preserve stats directly. The cast registry returns
+	// `NopCast` here without arg_properties, so handle this before reading metadata.
+	if (source == target) {
+		auto result = child_stats->ToUnique();
+		if (cast.try_cast && result) {
+			result->Set(StatsInfo::CAN_HAVE_NULL_VALUES);
+		}
+		return result;
+	}
+
+	// Read the bound cast's per-arg metadata. For monotonic casts we map child min/max through
+	// the static Value cast to derive output stats. The metadata is set per-bound-cast at the
+	// `*CastSwitch` registration site, so ICU overrides (which depend on session zone / DST)
+	// land here as UNKNOWN and the propagation correctly bails.
+	auto &props = cast.bound_cast.GetArgProperties();
+	if (!IsKnownMonotonic(props.monotonicity)) {
+		return nullptr;
+	}
+	if (BaseStatistics::GetStatsType(target) != StatisticsType::NUMERIC_STATS) {
+		// String / nested / interval output stats can't be derived this way.
+		return nullptr;
+	}
+	auto result_stats = StatisticsOperationsNumericNumericCast(*child_stats, target);
+	if (result_stats && IsMonotonicDecreasing(props.monotonicity)) {
+		// Decreasing cast: cast(min) is the new max, cast(max) is the new min.
+		Value swapped_min = NumericStats::Max(*result_stats);
+		Value swapped_max = NumericStats::Min(*result_stats);
+		NumericStats::SetMin(*result_stats, swapped_min);
+		NumericStats::SetMax(*result_stats, swapped_max);
+	}
 	if (cast.try_cast && result_stats) {
 		result_stats->Set(StatsInfo::CAN_HAVE_NULL_VALUES);
 	}
