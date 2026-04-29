@@ -12,7 +12,7 @@ bool TryPeelMonotonicLevel(const Expression &expr, MonotonicPeelStep &step, bool
 	step.inverts = false;
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 		auto &cast = expr.Cast<BoundCastExpression>();
-		if (!BoundCastExpression::CastIsInvertible(cast.child->return_type, cast.return_type)) {
+		if (!BoundCastExpression::CastIsInvertible(cast.child->GetReturnType(), cast.GetReturnType())) {
 			return false;
 		}
 		step.col_arg = 0;

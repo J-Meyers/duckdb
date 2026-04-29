@@ -16,7 +16,7 @@ static bool TryEvaluateAtConstants(ClientContext &context, const BoundFunctionEx
 		children.push_back(make_uniq<BoundConstantExpression>(v));
 	}
 	auto bind_info_clone = func.bind_info ? func.bind_info->Copy() : nullptr;
-	BoundFunctionExpression clone(func.return_type, func.function, std::move(children), std::move(bind_info_clone),
+	BoundFunctionExpression clone(func.GetReturnType(), func.function, std::move(children), std::move(bind_info_clone),
 	                              func.is_operator);
 	return ExpressionExecutor::TryEvaluateScalar(context, clone, result);
 }
@@ -37,8 +37,8 @@ static unique_ptr<BaseStatistics> TryPropagateMonotoneBounds(ClientContext &cont
 		return nullptr;
 	}
 	// only NumericStats carry the min/max needed for corner evaluation
-	if (BaseStatistics::GetStatsType(func.return_type) != StatisticsType::NUMERIC_STATS ||
-	    func.return_type.InternalType() == PhysicalType::BOOL) {
+	if (BaseStatistics::GetStatsType(func.GetReturnType()) != StatisticsType::NUMERIC_STATS ||
+	    func.GetReturnType().InternalType() == PhysicalType::BOOL) {
 		return nullptr;
 	}
 
@@ -108,7 +108,7 @@ static unique_ptr<BaseStatistics> TryPropagateMonotoneBounds(ClientContext &cont
 		std::swap(out_lo, out_hi);
 	}
 
-	auto result = NumericStats::CreateEmpty(func.return_type);
+	auto result = NumericStats::CreateEmpty(func.GetReturnType());
 	NumericStats::SetMin(result, out_lo);
 	NumericStats::SetMax(result, out_hi);
 
@@ -133,7 +133,7 @@ unique_ptr<BaseStatistics> StatisticsPropagator::PropagateExpression(BoundFuncti
 	for (idx_t i = 0; i < func.children.size(); i++) {
 		auto stat = PropagateExpression(func.children[i]);
 		if (!stat) {
-			stats.push_back(BaseStatistics::CreateUnknown(func.children[i]->return_type));
+			stats.push_back(BaseStatistics::CreateUnknown(func.children[i]->GetReturnType()));
 		} else {
 			stats.push_back(stat->Copy());
 		}

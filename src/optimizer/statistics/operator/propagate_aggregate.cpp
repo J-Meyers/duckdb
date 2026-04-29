@@ -118,7 +118,7 @@ bool TryGetValueFromStats(const PartitionStatistics &stats, const StorageIndex &
 bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_binding, bool &inverted) {
 	reference<const Expression> e = expr;
 	while (true) {
-		if (e.get().type == ExpressionType::BOUND_COLUMN_REF) {
+		if (e.get().GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			inner_binding = e.get().Cast<BoundColumnRefExpression>().binding;
 			return true;
 		}
@@ -134,7 +134,7 @@ bool TryExtractWrappedColumnRef(const Expression &expr, ColumnBinding &inner_bin
 }
 
 void SubstituteColumnRefWithConstant(unique_ptr<Expression> &expr, const Value &value) {
-	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		expr = make_uniq<BoundConstantExpression>(value);
 		return;
 	}
@@ -178,7 +178,7 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 			auto &agg_arg = *aggr_expr.children[0];
 			ColumnBinding inner_binding;
 			bool inverted = false;
-			if (agg_arg.type == ExpressionType::BOUND_COLUMN_REF) {
+			if (agg_arg.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				inner_binding = agg_arg.Cast<BoundColumnRefExpression>().binding;
 				agg_arg_wrappers.emplace_back();
 			} else {
@@ -189,14 +189,14 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 			}
 			wrapper_inverted.push_back(inverted);
 			min_max_bindings.push_back(inner_binding);
-			auto comparator = GetComparator(fun_name, agg_arg.return_type);
+			auto comparator = GetComparator(fun_name, agg_arg.GetReturnType());
 			if (!comparator) {
 				// Type has no min max statistics
 				return;
 			}
 			comparators.push_back(std::move(comparator));
 			agg_fun_names.push_back(fun_name);
-			agg_arg_types.push_back(agg_arg.return_type);
+			agg_arg_types.push_back(agg_arg.GetReturnType());
 		} else if (fun_name == "count_star") {
 			count_star_idxs.push_back(i);
 		} else {
@@ -218,7 +218,7 @@ void StatisticsPropagator::TryExecuteAggregates(LogicalAggregate &aggr, unique_p
 			auto &binding = min_max_bindings[i];
 			auto &proj = child_ref.get().Cast<LogicalProjection>();
 			auto &expr = proj.GetExpression(binding);
-			if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+			if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				binding = expr.Cast<BoundColumnRefExpression>().binding;
 				continue;
 			}

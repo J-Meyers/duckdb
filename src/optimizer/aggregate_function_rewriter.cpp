@@ -78,7 +78,8 @@ public:
 
 		// Replace AVG(x) with SUM(x)
 		auto &sum_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(optimizer.context, DEFAULT_SCHEMA, "sum");
-		const auto sum_fun = sum_entry.functions.GetFunctionByArguments(optimizer.context, {avg_child->return_type});
+		const auto sum_fun =
+		    sum_entry.functions.GetFunctionByArguments(optimizer.context, {avg_child->GetReturnType()});
 		vector<unique_ptr<Expression>> args;
 		args.push_back(std::move(avg_child));
 		auto count_arg = args.back()->Copy();
@@ -304,7 +305,7 @@ public:
 	unique_ptr<Expression> Rewrite(unique_ptr<Expression> &expr, vector<reference<Expression>> &,
 	                               vector<unique_ptr<Expression>> &additional_expressions) override {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		const auto original_child_type = aggr.children[0]->return_type;
+		const auto original_child_type = aggr.children[0]->GetReturnType();
 		auto current = std::move(aggr.children[0]);
 		bool inverted = false;
 
@@ -326,7 +327,7 @@ public:
 		// If parity is even and the peeled child's type matches the original, the existing min/max
 		// binding still applies; just swap in the new child. Otherwise rebind (child type changed,
 		// e.g. BIGINT -> TIMESTAMP, or we need to flip MIN <-> MAX).
-		if (!inverted && current->return_type == original_child_type) {
+		if (!inverted && current->GetReturnType() == original_child_type) {
 			aggr.children[0] = std::move(current);
 			return nullptr;
 		}
@@ -334,7 +335,7 @@ public:
 		const string new_name = inverted ? (aggr.function.name == "min" ? "max" : "min") : aggr.function.name;
 		auto &catalog = Catalog::GetSystemCatalog(optimizer.context);
 		auto &fn_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(optimizer.context, DEFAULT_SCHEMA, new_name);
-		const auto fn = fn_entry.functions.GetFunctionByArguments(optimizer.context, {current->return_type});
+		const auto fn = fn_entry.functions.GetFunctionByArguments(optimizer.context, {current->GetReturnType()});
 
 		FunctionBinder function_binder(optimizer.context);
 		vector<unique_ptr<Expression>> args;
@@ -479,14 +480,14 @@ private:
 			ColumnBinding aggregate_binding(aggr.group_index, ProjectionIndex(group_idx));
 			aggregate_map[aggregate_binding] = ColumnBinding(proj_index, ProjectionIndex(group_idx));
 			auto group_ref =
-			    make_uniq<BoundColumnRefExpression>(aggr.groups[group_idx]->return_type, aggregate_binding);
+			    make_uniq<BoundColumnRefExpression>(aggr.groups[group_idx]->GetReturnType(), aggregate_binding);
 			projection_expressions.push_back(std::move(group_ref));
 		}
 
 		for (idx_t i = 0; i < aggr_count; i++) {
 			ColumnBinding aggregate_binding(aggr.aggregate_index, ProjectionIndex(i));
 			aggregate_map[aggregate_binding] = ColumnBinding(proj_index, ProjectionIndex(group_count + i));
-			auto &aggr_type = aggr.expressions[i]->return_type;
+			auto &aggr_type = aggr.expressions[i]->GetReturnType();
 			auto aggr_ref = make_uniq<BoundColumnRefExpression>(aggr_type, aggregate_binding);
 
 			const auto rewrite_entry = rewrites.find(i);
@@ -500,7 +501,7 @@ private:
 			if (rule.NeedsHelperAggregate()) {
 				ColumnBinding count_binding(aggr.aggregate_index, ProjectionIndex(rewrite_info.count_idx));
 				auto count_ref = make_uniq<BoundColumnRefExpression>(
-				    aggr.expressions[rewrite_info.count_idx]->return_type, count_binding);
+				    aggr.expressions[rewrite_info.count_idx]->GetReturnType(), count_binding);
 				rewrite_info.additional_expressions.push_back(std::move(count_ref));
 			}
 			auto final_result = rule.CreateProjectionExpression(aggr_type, std::move(aggr_ref),
