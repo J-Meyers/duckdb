@@ -529,13 +529,20 @@ ScalarFunctionSet OperatorAddFun::GetFunctions() {
 	// we can add bignums together
 	add.AddFunction(AddFunction::GetFunction(LogicalType::BIGNUM, LogicalType::BIGNUM));
 
-	// `+` is monotonically non-decreasing in every argument, EXCEPT when the operand or result
-	// is TIME / TIME_TZ. TIME and TIME_TZ wrap modulo 24h (e.g. 23:00 + INTERVAL '5 hours' = 04:00),
-	// and DATE + TIME_TZ -> TIMESTAMP_TZ orders the output in UTC while TIME_TZ ordering does not
-	// agree with UTC instant ordering, so corner-evaluation through the propagator picks the wrong
-	// extremum.
+	// `+` is monotonically non-decreasing in every argument, EXCEPT in two cases:
+	// 1. TIME / TIME_TZ operands wrap modulo 24h (e.g. 23:00 + INTERVAL '5 hours' = 04:00), and
+	//    DATE + TIME_TZ -> TIMESTAMP_TZ orders the output in UTC while TIME_TZ ordering does not
+	//    agree with UTC instant ordering — corner-evaluation picks the wrong extremum.
+	// 2. The INTERVAL arg in DATE/TIMESTAMP + INTERVAL: INTERVAL's < operator uses 30-day months
+	//    (so INTERVAL '29 days' < INTERVAL '1 month'), but DATE/TIMESTAMP arithmetic uses calendar
+	//    months, so e.g. '2025-02-01' + INTERVAL '29 days' = '2025-03-02' is GREATER than
+	//    '2025-02-01' + INTERVAL '1 month' = '2025-03-01'. Monotonicity in the INTERVAL arg is
+	//    broken whenever the result type isn't INTERVAL.
 	const auto involves_time = [](const LogicalType &t) {
 		return t.id() == LogicalTypeId::TIME || t.id() == LogicalTypeId::TIME_TZ;
+	};
+	const auto is_interval = [](const LogicalType &t) {
+		return t.id() == LogicalTypeId::INTERVAL;
 	};
 	for (auto &fun : add.functions) {
 		if (involves_time(fun.GetReturnType())) {
@@ -546,10 +553,15 @@ ScalarFunctionSet OperatorAddFun::GetFunctions() {
 			continue;
 		}
 		const auto arity = args.size();
+		const bool ret_is_interval = is_interval(fun.GetReturnType());
 		if (arity == 1) {
 			fun.SetUnaryArgProperties(ArgProperties().Increasing());
 		} else if (arity == 2) {
-			fun.SetArgProperties({ArgProperties().Increasing(), ArgProperties().Increasing()});
+			ArgProperties left =
+			    is_interval(args[0]) && !ret_is_interval ? ArgProperties() : ArgProperties().Increasing();
+			ArgProperties right =
+			    is_interval(args[1]) && !ret_is_interval ? ArgProperties() : ArgProperties().Increasing();
+			fun.SetArgProperties({left, right});
 		}
 	}
 
@@ -731,7 +743,9 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			ScalarFunction function("-", {left_type, right_type}, LogicalType::TIMESTAMP,
 			                        ScalarFunction::BinaryFunction<date_t, interval_t, timestamp_t, SubtractOperator>);
 			function.SetFallible();
-			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties().Decreasing()});
+			// Monotonic in DATE only; INTERVAL ordering uses 30-day months but DATE arithmetic uses
+			// calendar months so monotonicity in the INTERVAL arg is broken (see OperatorAddFun).
+			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties()});
 			return function;
 		}
 		break;
@@ -748,7 +762,8 @@ ScalarFunction SubtractFunction::GetFunction(const LogicalType &left_type, const
 			    "-", {left_type, right_type}, LogicalType::TIMESTAMP,
 			    ScalarFunction::BinaryFunction<timestamp_t, interval_t, timestamp_t, SubtractOperator>);
 			function.SetFallible();
-			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties().Decreasing()});
+			// Monotonic in TIMESTAMP only; see DATE - INTERVAL above.
+			function.SetArgProperties({ArgProperties().Increasing(), ArgProperties()});
 			return function;
 		}
 		break;

@@ -325,3 +325,104 @@ SELECT count(a.d + b.z) + count(a.z + b.d) + count(a.t + INTERVAL '5 hours') + c
 FROM peel_dz a, peel_dz b
 ----
 42
+
+# === DATE/TIMESTAMP +/- INTERVAL: INTERVAL arg's normalize-based ordering (30-day months) does
+#     NOT agree with calendar-month arithmetic. INTERVAL '29 days' < INTERVAL '1 month' per
+#     ordering, but '2025-02-01' + INTERVAL '29 days' (= 2025-03-02) > '2025-02-01' + '1 month'
+#     (= 2025-03-01). The peel must NOT fire on the INTERVAL arg of these mixed overloads. ===
+
+statement ok
+CREATE TABLE peel_di (d DATE, ts TIMESTAMP, ival INTERVAL)
+
+statement ok
+INSERT INTO peel_di VALUES (DATE '2025-02-01', TIMESTAMP '2025-02-01 00:00', INTERVAL '1 month'),
+                           (DATE '2025-02-01', TIMESTAMP '2025-02-01 00:00', INTERVAL '29 days')
+
+# DATE + interval_col: peel must NOT lift; correct answer is 2025-03-01 (from + 1 month)
+query I
+SELECT MIN(d + ival) FROM peel_di
+----
+2025-03-01 00:00:00
+
+# TIMESTAMP + interval_col: same
+query I
+SELECT MIN(ts + ival) FROM peel_di
+----
+2025-03-01 00:00:00
+
+# DATE - interval_col: correct answer is 2025-01-01 (from - 1 month).
+# 2025-02-01 - 29 days = 2025-01-03; 2025-02-01 - 1 month = 2025-01-01.
+query I
+SELECT MIN(d - ival) FROM peel_di
+----
+2025-01-01 00:00:00
+
+# TIMESTAMP - interval_col: same
+query I
+SELECT MIN(ts - ival) FROM peel_di
+----
+2025-01-01 00:00:00
+
+# Verify the unaggregated (correct) values to anchor the test against any future regressions.
+query III rowsort
+SELECT d + ival, d - ival, ival FROM peel_di
+----
+2025-03-01 00:00:00	2025-01-01 00:00:00	1 month
+2025-03-02 00:00:00	2025-01-03 00:00:00	29 days
+
+# Date + literal interval: column is the DATE arg. Peel here IS valid (calendar shift is
+# monotonic in the DATE for fixed interval) — annotation kept for that case.
+# All d values equal '2025-02-01', so MIN == MAX == '2025-03-01 00:00:00'.
+query II
+SELECT MIN(d + INTERVAL '1 month'), MAX(d + INTERVAL '1 month') FROM peel_di
+----
+2025-03-01 00:00:00	2025-03-01 00:00:00
+
+# === TIME_TZ epoch regression: MIN(time_tz) uses raw-bits comparison (time portion in high
+#     bits, encoded offset in low bits). epoch(time_tz) only depends on the time portion and
+#     therefore agrees with MIN's ordering. Lock this in: if MIN(time_tz) is ever changed to
+#     use sort_key (UTC instant), this test starts failing — at which point the peel
+#     annotation on the TIME_TZ overload of epoch() becomes wrong and must be dropped. ===
+
+statement ok
+CREATE TABLE peel_ttz (v TIMETZ)
+
+statement ok
+INSERT INTO peel_ttz VALUES ('11:00:00+12'), ('12:00:00-12'), ('12:00:00+00')
+
+# epoch on each row: 11:00 -> 39600, 12:00 -> 43200, 12:00 -> 43200
+# MIN(epoch(v)) = 39600. MIN(v) per raw bits = 11:00:00+12, epoch -> 39600. Same.
+query II
+SELECT MIN(epoch(v)), epoch(MIN(v)) FROM peel_ttz
+----
+39600.0	39600.0
+
+# === Minimal S5: invertible cast peel (BIGINT widen) — both sides agree ===
+statement ok
+CREATE TABLE peel_cast (i32 INTEGER)
+
+statement ok
+INSERT INTO peel_cast VALUES (1), (5), (3), (NULL)
+
+query I
+SELECT MIN(i32::BIGINT) FROM peel_cast
+----
+1
+
+# === Minimal S5: empty-input MIN/MAX through wrapper returns NULL ===
+statement ok
+CREATE TABLE peel_empty (dt DATE)
+
+query II
+SELECT MIN(year(dt)), MAX(year(dt)) FROM peel_empty
+----
+NULL	NULL
+
+# === Minimal S5: all-NULL input MIN/MAX through wrapper returns NULL ===
+statement ok
+INSERT INTO peel_empty VALUES (NULL), (NULL)
+
+query II
+SELECT MIN(year(dt)), MAX(year(dt)) FROM peel_empty
+----
+NULL	NULL
