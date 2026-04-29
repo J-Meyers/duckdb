@@ -5,9 +5,15 @@
 
 namespace duckdb {
 
-static unique_ptr<BaseStatistics> StatisticsOperationsNumericNumericCast(const BaseStatistics &input,
-                                                                         const LogicalType &target) {
-	// Bail out if the stats are not numeric
+namespace {
+//! Cast min/max boundary values via the supplied cast function, then assemble output stats.
+//! The boolean controls which cast registry is used: with a context, the active registry
+//! (including extension overrides like ICU) drives the conversion so the propagated bounds
+//! match what the runtime cast would produce. Without a context (storage-layer callers),
+//! `DefaultTryCastAs` uses a fresh `CastFunctionSet` containing only the default casts —
+//! which is correct as long as no extension override is in play for those paths.
+unique_ptr<BaseStatistics> CastNumericBounds(const BaseStatistics &input, const LogicalType &target,
+                                             optional_ptr<ClientContext> context) {
 	if (input.GetStatsType() != StatisticsType::NUMERIC_STATS) {
 		return nullptr;
 	}
@@ -16,8 +22,9 @@ static unique_ptr<BaseStatistics> StatisticsOperationsNumericNumericCast(const B
 	}
 	Value min = NumericStats::Min(input);
 	Value max = NumericStats::Max(input);
-	if (!min.DefaultTryCastAs(target) || !max.DefaultTryCastAs(target)) {
-		// overflow in cast: bailout
+	const bool ok = context ? (min.TryCastAs(*context, target) && max.TryCastAs(*context, target))
+	                        : (min.DefaultTryCastAs(target) && max.DefaultTryCastAs(target));
+	if (!ok) {
 		return nullptr;
 	}
 	auto result = NumericStats::CreateEmpty(target);
@@ -25,6 +32,12 @@ static unique_ptr<BaseStatistics> StatisticsOperationsNumericNumericCast(const B
 	NumericStats::SetMin(result, min);
 	NumericStats::SetMax(result, max);
 	return result.ToUnique();
+}
+} // namespace
+
+static unique_ptr<BaseStatistics> StatisticsOperationsNumericNumericCast(const BaseStatistics &input,
+                                                                         const LogicalType &target) {
+	return CastNumericBounds(input, target, nullptr);
 }
 
 bool StatisticsPropagator::CanPropagateCast(const LogicalType &source, const LogicalType &target) {
@@ -228,9 +241,9 @@ unique_ptr<BaseStatistics> StatisticsPropagator::PropagateExpression(BoundCastEx
 	}
 
 	// Read the bound cast's per-arg metadata. For monotonic casts we map child min/max through
-	// the static Value cast to derive output stats. The metadata is set per-bound-cast at the
-	// `*CastSwitch` registration site, so ICU overrides (which depend on session zone / DST)
-	// land here as UNKNOWN and the propagation correctly bails.
+	// the same cast that runs at query time (extension overrides included). The metadata is set
+	// per-bound-cast at the `*CastSwitch` registration site, so ICU overrides that don't claim
+	// monotonicity land here as UNKNOWN and the propagation correctly bails.
 	auto &props = cast.bound_cast.GetArgProperties();
 	if (!IsKnownMonotonic(props.monotonicity)) {
 		return nullptr;
@@ -239,7 +252,7 @@ unique_ptr<BaseStatistics> StatisticsPropagator::PropagateExpression(BoundCastEx
 		// String / nested / interval output stats can't be derived this way.
 		return nullptr;
 	}
-	auto result_stats = StatisticsOperationsNumericNumericCast(*child_stats, target);
+	auto result_stats = CastNumericBounds(*child_stats, target, &context);
 	if (result_stats && IsMonotonicDecreasing(props.monotonicity)) {
 		// Decreasing cast: cast(min) is the new max, cast(max) is the new min.
 		Value swapped_min = NumericStats::Max(*result_stats);
