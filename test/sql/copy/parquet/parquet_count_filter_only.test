@@ -1,0 +1,32 @@
+# name: test/sql/copy/parquet/parquet_count_filter_only.test
+# description: Plan-level checks for filter-only column detection on count(*)-style scans
+# group: [parquet]
+
+require parquet
+
+statement ok
+COPY (
+  SELECT (10000 + i)::INTEGER AS id, (i % 100)::INTEGER AS bucket
+  FROM range(200000) t(i)
+) TO '{TEST_DIR}/proj.parquet' (ROW_GROUP_SIZE 50000);
+
+statement ok
+PRAGMA explain_output = 'PHYSICAL_ONLY'
+
+# count(*) WHERE filter on bucket: scan emits no projected columns
+query II
+EXPLAIN SELECT count(*) FROM '{TEST_DIR}/proj.parquet' WHERE bucket = 5;
+----
+physical_plan	<!REGEX>:.*Projections:.*
+
+# sum(id) WHERE filter on bucket: id projected, bucket filter-only
+query II
+EXPLAIN SELECT sum(id) FROM '{TEST_DIR}/proj.parquet' WHERE bucket = 5;
+----
+physical_plan	<REGEX>:.*Projections: id.*
+
+# correctness: count(*) over a filter-only column must include every row that passes the predicate
+query II
+SELECT count(*), sum(id) FROM '{TEST_DIR}/proj.parquet' WHERE bucket = 5;
+----
+2000	219910000

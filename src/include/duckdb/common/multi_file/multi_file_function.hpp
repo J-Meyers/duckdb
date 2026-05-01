@@ -390,7 +390,17 @@ public:
 
 		auto &executor = lstate.executor;
 		executor.ClearExpressions();
-		if (!projection_ids.empty()) {
+		// projection_ids may contain a COLUMN_IDENTIFIER_EMPTY sentinel for the count(*) case (no real
+		// projections). The sentinel is out-of-bounds for reader_data.expressions, so fall back to the
+		// emit-all path — output schema (op.types) still has slots for every reader expression.
+		bool has_empty_marker = false;
+		for (auto id : projection_ids) {
+			if (id == COLUMN_IDENTIFIER_EMPTY) {
+				has_empty_marker = true;
+				break;
+			}
+		}
+		if (!projection_ids.empty() && !has_empty_marker) {
 			for (auto &id : projection_ids) {
 				executor.AddExpression(*reader_data.expressions[id]);
 			}
@@ -530,6 +540,7 @@ public:
 		    result->multi_file_reader_state && result->multi_file_reader_state->RequiresExtraColumns();
 		if (input.CanRemoveFilterColumns() || require_extra_columns) {
 			if (!input.projection_ids.empty()) {
+				// includes the count(*) case where input.projection_ids is [COLUMN_IDENTIFIER_EMPTY]
 				result->projection_ids = input.projection_ids;
 			} else {
 				result->projection_ids.resize(input.column_indexes.size());

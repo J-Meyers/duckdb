@@ -54,7 +54,9 @@ public:
 	unique_ptr<DeleteFilter> deletion_filter;
 	//! Global identifiers (which column position of the projected output this filter operates) for the filters
 	vector<MultiFileGlobalIndex> filter_global_indices;
-	//! Local column_ids positions that appear in projected output; empty means all projected.
+	//! Local column_ids positions that appear in projected output. A non-empty list whose only entry is
+	//! the COLUMN_IDENTIFIER_EMPTY sentinel means "explicitly nothing real is projected" (count(*) case);
+	//! a truly empty list carries no info and is treated as "all projected" (legacy fallback).
 	vector<idx_t> projection_ids;
 
 public:

@@ -353,6 +353,10 @@ InsertionOrderPreservingMap<string> PhysicalTableScan::ParamsToString() const {
 		idx_t projected_column_count = function.filter_prune ? projection_ids.size() : column_ids.size();
 		for (idx_t i = 0; i < projected_column_count; i++) {
 			auto base_index = function.filter_prune ? projection_ids[i] : i;
+			if (base_index >= column_ids.size()) {
+				// out-of-bounds sentinel (e.g. COLUMN_IDENTIFIER_EMPTY signalling "nothing real projected")
+				continue;
+			}
 			auto &column_index = column_ids[base_index];
 			auto column_id = column_index.GetPrimaryIndex();
 			if (column_id >= names.size()) {

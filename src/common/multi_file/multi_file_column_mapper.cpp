@@ -1184,12 +1184,17 @@ ReaderInitializeType MultiFileColumnMapper::CreateMapping(MultiFileColumnMapping
 	reader_data.reader->filters = CreateFilters(remaining_filters, result);
 
 	// translate reader.projection_ids from global to file-local space; constant-mapped globals (virtual / missing)
-	// have no local slot and are dropped — they don't appear in reader.column_ids.
+	// have no local slot and are dropped — they don't appear in reader.column_ids. The COLUMN_IDENTIFIER_EMPTY
+	// sentinel survives the translation so readers can detect "explicitly nothing real projected" without a flag.
 	auto &reader_projection_ids = reader_data.reader->projection_ids;
 	if (!reader_projection_ids.empty()) {
 		vector<idx_t> local_projection_ids;
 		local_projection_ids.reserve(reader_projection_ids.size());
 		for (auto global_idx : reader_projection_ids) {
+			if (global_idx == COLUMN_IDENTIFIER_EMPTY) {
+				local_projection_ids.push_back(COLUMN_IDENTIFIER_EMPTY);
+				continue;
+			}
 			auto it = result.global_to_local.find(MultiFileGlobalIndex(global_idx));
 			if (it != result.global_to_local.end()) {
 				local_projection_ids.push_back(it->second.mapping.index.GetIndex());

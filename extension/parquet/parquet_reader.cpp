@@ -1355,11 +1355,16 @@ void ParquetReader::InitializeScan(ClientContext &context, ParquetReaderScanStat
 	if (filters) {
 		state.adaptive_filter_cache.InitializeAdaptiveFilter(*filters, filter_global_indices, context.logger,
 		                                                     file.path);
+		// truly empty projection_ids carries no info — treat every column as projected (legacy fallback).
+		// A non-empty list explicitly marks projected positions; a list whose only entry is the
+		// COLUMN_IDENTIFIER_EMPTY sentinel signals "explicitly nothing real is projected" (count(*) case),
+		// in which case no real column position is set.
 		vector<bool> is_projected(column_ids.size(), projection_ids.empty());
 		for (auto id : projection_ids) {
-			// projection_ids has been translated to file-local space by MultiFileColumnMapper::CreateMapping
-			D_ASSERT(id < is_projected.size());
-			is_projected[id] = true;
+			if (id < is_projected.size()) {
+				is_projected[id] = true;
+			}
+			// else: out-of-bounds sentinel (e.g. COLUMN_IDENTIFIER_EMPTY); no real column to mark.
 		}
 		for (auto &entry : *filters) {
 			const auto filter_local_idx = entry.GetIndex();

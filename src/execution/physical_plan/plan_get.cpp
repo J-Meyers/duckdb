@@ -111,6 +111,9 @@ PhysicalOperator &PhysicalPlanGenerator::CreatePlan(LogicalGet &op) {
 				}
 				optional_idx column_id_filter;
 				for (idx_t i = 0; i < projection_ids.size(); i++) {
+					if (projection_ids[i].GetIndex() >= column_ids.size()) {
+						continue; // skip COLUMN_IDENTIFIER_EMPTY sentinel
+					}
 					if (column_ids[projection_ids[i]] == column_idx) {
 						column_id_filter = i;
 						break;

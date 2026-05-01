@@ -38,7 +38,9 @@ public:
 	vector<string> names;
 	//! A mapping of column index -> type/name for all virtual columns
 	virtual_column_map_t virtual_columns;
-	//! Columns that are used outside the scan
+	//! Columns that are used outside the scan. RemoveUnusedColumns finalizes this list; for a count(*)
+	//! over a filter (no real projections) it inserts the COLUMN_IDENTIFIER_EMPTY sentinel so consumers
+	//! can distinguish "explicitly nothing projected" from the legacy empty list (no info).
 	vector<ProjectionIndex> projection_ids;
 	//! Filters pushed down for table scan
 	TableFilterSet table_filters;

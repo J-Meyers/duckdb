@@ -819,6 +819,7 @@ void RemoveUnusedColumns::RemoveColumnsFromLogicalGet(LogicalGet &get, unique_pt
 			    return child_entry->second;
 		    });
 	}
+	bool has_empty_placeholder = false;
 	if (new_column_ids.empty()) {
 		// this generally means we are only interested in whether or not anything exists in the table (e.g.
 		// EXISTS(SELECT * FROM tbl)) in this case, we just scan the row identifier column as it means we do not
@@ -826,6 +827,7 @@ void RemoveUnusedColumns::RemoveColumnsFromLogicalGet(LogicalGet &get, unique_pt
 		auto any_column = get.GetAnyColumn();
 		original_ids.emplace_back(any_column);
 		new_column_ids.emplace_back(any_column);
+		has_empty_placeholder = (any_column == COLUMN_IDENTIFIER_EMPTY);
 	}
 	get.SetColumnIds(std::move(new_column_ids));
 
@@ -889,6 +891,13 @@ void RemoveUnusedColumns::RemoveColumnsFromLogicalGet(LogicalGet &get, unique_pt
 				break;
 			}
 		}
+	}
+	if (has_empty_placeholder && get.projection_ids.empty()) {
+		// count(*)-style scan with no real projections — surface this to readers via the
+		// COLUMN_IDENTIFIER_EMPTY sentinel rather than an external flag, so the global→local translation
+		// in MultiFileColumnMapper can preserve it and downstream consumers can distinguish "explicitly
+		// nothing projected" from the legacy "no projection info, treat as all" interpretation.
+		get.projection_ids.push_back(ProjectionIndex(COLUMN_IDENTIFIER_EMPTY));
 	}
 }
 
