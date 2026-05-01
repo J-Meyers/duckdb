@@ -9,8 +9,12 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/common/vector.hpp"
 
 namespace duckdb {
+
+class BoundFunctionExpression;
 
 //! Monotonicity of a function in one argument (other args held constant).
 enum class Monotonicity : uint8_t {
@@ -22,9 +26,22 @@ enum class Monotonicity : uint8_t {
 	STRICTLY_DECREASING,
 };
 
-//! Per-argument metadata for a scalar function.
+//! Interval [lo, hi) — lo inclusive, hi exclusive.
+struct HalfOpenInterval {
+	Value lo;
+	Value hi;
+};
+
 struct ArgProperties {
 	Monotonicity monotonicity = Monotonicity::UNKNOWN;
+	//! May return NULL on +/-inf or NaN inputs.
+	bool requires_finite_input = false;
+	bool injective = false;
+
+	//! Inputs mapping to `output_point`. Empty = nothing maps to it.
+	using PreimageFn = vector<HalfOpenInterval> (*)(const BoundFunctionExpression &expr, idx_t arg_idx,
+	                                                const Value &output_point);
+	PreimageFn preimage = nullptr;
 
 	ArgProperties &StrictlyIncreasing() {
 		monotonicity = Monotonicity::STRICTLY_INCREASING;
@@ -44,6 +61,18 @@ struct ArgProperties {
 	}
 	ArgProperties &Constant() {
 		monotonicity = Monotonicity::CONSTANT;
+		return *this;
+	}
+	ArgProperties &RequiresFinite() {
+		requires_finite_input = true;
+		return *this;
+	}
+	ArgProperties &Injective() {
+		injective = true;
+		return *this;
+	}
+	ArgProperties &WithPreimage(PreimageFn p) {
+		preimage = p;
 		return *this;
 	}
 };

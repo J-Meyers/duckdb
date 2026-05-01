@@ -20,6 +20,7 @@ add_library_unity(
   move_constants.cpp
   ordered_aggregate_optimizer.cpp
   predicate_factoring.cpp
+  preimage_rewrite.cpp
   regex_optimizations.cpp
   timestamp_comparison.cpp
   constant_order_normalization.cpp)

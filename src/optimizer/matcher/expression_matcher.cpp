@@ -55,6 +55,18 @@ bool CastExpressionMatcher::Match(Expression &expr_p, vector<reference<Expressio
 	return matcher->Match(*expr.child, bindings);
 }
 
+bool BetweenExpressionMatcher::Match(Expression &expr_p, vector<reference<Expression>> &bindings) {
+	if (!ExpressionMatcher::Match(expr_p, bindings)) {
+		return false;
+	}
+	auto &expr = expr_p.Cast<BoundBetweenExpression>();
+	vector<reference<Expression>> expressions;
+	expressions.push_back(*expr.input);
+	expressions.push_back(*expr.lower);
+	expressions.push_back(*expr.upper);
+	return SetMatcher::Match(matchers, expressions, bindings, SetMatcher::Policy::ORDERED);
+}
+
 bool InClauseExpressionMatcher::Match(Expression &expr_p, vector<reference<Expression>> &bindings) {
 	if (!ExpressionMatcher::Match(expr_p, bindings)) {
 		return false;

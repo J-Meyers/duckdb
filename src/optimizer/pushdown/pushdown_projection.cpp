@@ -1,4 +1,6 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
+#include "duckdb/optimizer/expression_rewriter.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
@@ -56,6 +58,9 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownProjection(unique_ptr<Logica
 		} else {
 			// rewrite the bindings within this subquery
 			f.filter = ReplaceProjectionBindings(proj, std::move(f.filter));
+			// Re-run the expression rewriter: substitution may expose patterns (e.g. f(col)
+			// from a view-defined projection) that the initial rewriter pass couldn't see.
+			optimizer.rewriter.VisitExpression(&f.filter);
 			// add the filter to the child pushdown
 			if (child_pushdown.AddFilter(std::move(f.filter)) == FilterResult::UNSATISFIABLE) {
 				// filter statically evaluates to false, strip tree

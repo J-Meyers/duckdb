@@ -20,6 +20,21 @@ void MakeDateFromEpoch(DataChunk &input, ExpressionState &state, Vector &result)
 	result.Reinterpret(input.data[0]);
 }
 
+vector<HalfOpenInterval> MakeDateFromEpochPreimage(const BoundFunctionExpression &expr, idx_t arg_idx,
+                                                   const Value &output_point) {
+	if (output_point.IsNull() || output_point.type().id() != LogicalTypeId::DATE) {
+		return {};
+	}
+	auto d = output_point.GetValue<date_t>();
+	if (!Date::IsFinite(d)) {
+		return {};
+	}
+	HalfOpenInterval iv;
+	iv.lo = Value::INTEGER(d.days);
+	iv.hi = Value::INTEGER(d.days + 1);
+	return {iv};
+}
+
 struct MakeDateOperator {
 	template <typename YYYY, typename MM, typename DD, typename RESULT_TYPE>
 	static RESULT_TYPE Operation(YYYY yyyy, MM mm, DD dd) {
@@ -153,6 +168,10 @@ ScalarFunctionSet MakeDateFun::GetFunctions() {
 		func.SetFallible();
 		func.SetUnaryArgProperties(ArgProperties().StrictlyIncreasing());
 	}
+	// The INTEGER->DATE overload is a bit-identical reinterpret; equip it with a preimage
+	// so predicates like `make_date(d) >= '2020-01-01'` can be lifted onto `d` directly.
+	make_date.functions[0].SetUnaryArgProperties(
+	    ArgProperties().StrictlyIncreasing().Injective().WithPreimage(MakeDateFromEpochPreimage));
 	return make_date;
 }
 

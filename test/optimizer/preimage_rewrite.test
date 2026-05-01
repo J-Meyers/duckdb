@@ -1,0 +1,138 @@
+# name: test/optimizer/preimage_rewrite.test
+# description: Test predicate rewrite via ArgProperties::preimage. Phase 3 minimal cut: make_date(INTEGER) only.
+# group: [optimizer]
+
+require no_alternative_verify
+
+statement ok
+CREATE TABLE t AS SELECT i::INTEGER AS d FROM range(0, 365) _(i)
+
+# The view exposes the integer days column as a DATE.
+statement ok
+CREATE VIEW v AS SELECT make_date(d) AS event_date FROM t
+
+# === Plan-shape regressions: make_date should not appear in the physical filter ===
+
+# >= : should rewrite to a direct predicate on `d` (no make_date in physical plan)
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date >= DATE '1970-04-01'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# <= : same
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date <= DATE '1970-12-31'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# = : decomposes into an AND of >= and <
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date = DATE '1970-04-01'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# > : becomes >= hi
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date > DATE '1970-04-01'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# < : becomes < lo
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date < DATE '1970-04-01'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# constant on the LEFT canonicalizes via FlipComparisonExpression
+query II
+EXPLAIN SELECT count(*) FROM v WHERE DATE '1970-04-01' <= event_date
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+# === Correctness ===
+
+# >= April 1 1970 (day 90) : 365 - 90 = 275 rows
+query I
+SELECT count(*) FROM v WHERE event_date >= DATE '1970-04-01'
+----
+275
+
+# = April 1 1970 : exactly one row
+query I
+SELECT count(*) FROM v WHERE event_date = DATE '1970-04-01'
+----
+1
+
+# range filter (Q36-style)
+query I
+SELECT count(*) FROM v WHERE event_date >= DATE '1970-04-01' AND event_date < DATE '1970-05-01'
+----
+30
+
+# > April 1 1970 : 274 rows (excludes the boundary)
+query I
+SELECT count(*) FROM v WHERE event_date > DATE '1970-04-01'
+----
+274
+
+# < April 1 1970 : 90 rows (days 0-89)
+query I
+SELECT count(*) FROM v WHERE event_date < DATE '1970-04-01'
+----
+90
+
+# <= April 1 1970 : 91 rows
+query I
+SELECT count(*) FROM v WHERE event_date <= DATE '1970-04-01'
+----
+91
+
+# <> April 1 1970 : 364 rows
+query I
+SELECT count(*) FROM v WHERE event_date <> DATE '1970-04-01'
+----
+364
+
+# === NULL handling: NULL constant should not be rewritten (left to other rules) ===
+query I
+SELECT count(*) FROM v WHERE event_date = NULL
+----
+0
+
+# === BETWEEN rewrites ===
+
+# inclusive both sides — the planner folds `>= AND <=` into a BoundBetweenExpression.
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date BETWEEN DATE '1970-04-01' AND DATE '1970-04-30'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+query I
+SELECT count(*) FROM v WHERE event_date BETWEEN DATE '1970-04-01' AND DATE '1970-04-30'
+----
+30
+
+# `>= AND <=` form (folded to BETWEEN by the planner)
+query II
+EXPLAIN SELECT count(*) FROM v WHERE event_date >= DATE '1970-04-01' AND event_date <= DATE '1970-04-30'
+----
+physical_plan	<!REGEX>:.*make_date.*
+
+query I
+SELECT count(*) FROM v WHERE event_date >= DATE '1970-04-01' AND event_date <= DATE '1970-04-30'
+----
+30
+
+# === Negative cases: ternary make_date should NOT be rewritten ===
+# (no preimage on the 3-arg overload — only Increasing on arg 0)
+query II
+EXPLAIN SELECT count(*) FROM (VALUES (2024, 1, 1), (2024, 6, 15), (2024, 12, 31)) AS x(y, m, dy)
+WHERE make_date(y, m, dy) >= DATE '2024-06-01'
+----
+physical_plan	<REGEX>:.*make_date.*
+
+query I
+SELECT count(*) FROM (VALUES (2024, 1, 1), (2024, 6, 15), (2024, 12, 31)) AS x(y, m, dy)
+WHERE make_date(y, m, dy) >= DATE '2024-06-01'
+----
+2

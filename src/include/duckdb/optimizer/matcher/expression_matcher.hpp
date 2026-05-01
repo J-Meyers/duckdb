@@ -87,6 +87,16 @@ public:
 	bool Match(Expression &expr, vector<reference<Expression>> &bindings) override;
 };
 
+//! Matches a BoundBetweenExpression. Children always matched in order: input, lower, upper.
+class BetweenExpressionMatcher : public ExpressionMatcher {
+public:
+	BetweenExpressionMatcher() : ExpressionMatcher(ExpressionClass::BOUND_BETWEEN) {
+	}
+	vector<unique_ptr<ExpressionMatcher>> matchers;
+
+	bool Match(Expression &expr, vector<reference<Expression>> &bindings) override;
+};
+
 class InClauseExpressionMatcher : public ExpressionMatcher {
 public:
 	InClauseExpressionMatcher() : ExpressionMatcher(ExpressionClass::BOUND_OPERATOR) {
