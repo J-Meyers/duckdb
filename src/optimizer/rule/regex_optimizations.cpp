@@ -13,6 +13,8 @@
 #include "re2/re2.h"
 #include "re2/regexp.h"
 
+#include <iostream>
+
 namespace duckdb {
 
 RegexOptimizationRule::RegexOptimizationRule(ExpressionRewriter &rewriter) : Rule(rewriter) {
@@ -278,6 +280,17 @@ unique_ptr<Expression> RegexpReplaceExtractRule::Apply(LogicalOperator &op, vect
 		return nullptr;
 	}
 
+	// Trim trailing .*$ from the pattern to avoid unnecessary matching work
+	string trimmed_pattern = pattern;
+	bool has_trailing_dotstar = false;
+	if (pattern.size() >= 3 && pattern.compare(pattern.size() - 3, 3, ".*$") == 0) {
+		// Don't trim if the dot is escaped (e.g., \.*$)
+		if (pattern.size() < 4 || pattern[pattern.size() - 4] != '\\') {
+			trimmed_pattern = pattern.substr(0, pattern.size() - 3);
+			has_trailing_dotstar = true;
+		}
+	}
+
 	string options_str = "k";
 	if (root.children.size() == 4) {
 		auto &options_const = root.children[3]->Cast<BoundConstantExpression>();
@@ -286,11 +299,85 @@ unique_ptr<Expression> RegexpReplaceExtractRule::Apply(LogicalOperator &op, vect
 		}
 		options_str = StringValue::Get(options_const.value) + options_str;
 	}
+	// Add a marker to indicate the pattern was trimmed (for runtime newline check)
+	if (has_trailing_dotstar) {
+		options_str += "T";  // T = Trimmed dotstar
+	}
 
 	vector<unique_ptr<Expression>> extract_children;
 	extract_children.emplace_back(std::move(root.children[0]));
-	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value(pattern)));
+	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value(trimmed_pattern)));
 	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(group_index)));
+	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value(std::move(options_str))));
+
+	FunctionBinder binder(rewriter.context);
+	ErrorData error;
+	auto extract_expr = binder.BindScalarFunction(DEFAULT_SCHEMA, "regexp_extract", std::move(extract_children), error);
+	if (!extract_expr) {
+		return nullptr;
+	}
+	return extract_expr;
+}
+
+RegexpExtractOptimizationRule::RegexpExtractOptimizationRule(ExpressionRewriter &rewriter) : Rule(rewriter) {
+	auto func = make_uniq<FunctionExpressionMatcher>();
+	func->function = make_uniq<SpecificFunctionMatcher>("regexp_extract");
+	func->policy = SetMatcher::Policy::SOME_ORDERED;
+	func->matchers.push_back(make_uniq<ExpressionMatcher>());
+	func->matchers.push_back(make_uniq<ConstantExpressionMatcher>());
+	func->matchers.push_back(make_uniq<ExpressionMatcher>());
+	root = std::move(func);
+}
+
+// Optimizes regexp_extract by trimming trailing .*$ from constant patterns to avoid unnecessary matching work.
+// This complements RegexpReplaceExtractRule by applying the same optimization to direct regexp_extract calls.
+unique_ptr<Expression> RegexpExtractOptimizationRule::Apply(LogicalOperator &op, vector<reference<Expression>> &bindings,
+                                                            bool &changes_made, bool is_root) {
+	auto &root = bindings[0].get().Cast<BoundFunctionExpression>();
+	if (!root.bind_info) {
+		return nullptr;
+	}
+	auto &bind_data = root.bind_info->Cast<RegexpExtractBindData>();
+	if (!bind_data.constant_pattern) {
+		return nullptr;
+	}
+	// Literal mode treats `$` as a literal char, so trimming would be incorrect.
+	if (bind_data.options.literal()) {
+		return nullptr;
+	}
+	// Already optimized (has the 'T' flag from a previous optimization pass)
+	if (bind_data.reject_trailing_newlines) {
+		return nullptr;
+	}
+
+	const auto &pattern = bind_data.constant_string;
+	// Check if pattern ends with .*$ (and the dot is not escaped)
+	if (pattern.size() < 3 || pattern.compare(pattern.size() - 3, 3, ".*$") != 0) {
+		return nullptr;
+	}
+	if (pattern.size() >= 4 && pattern[pattern.size() - 4] == '\\') {
+		// Escaped dot: \.*$ should not be trimmed
+		return nullptr;
+	}
+
+	// Trim the trailing .*$
+	string trimmed_pattern = pattern.substr(0, pattern.size() - 3);
+
+	// Build new options string with 'T' flag to indicate trimming
+	string options_str = "T";
+	if (root.children.size() == 4) {
+		auto &options_const = root.children[3]->Cast<BoundConstantExpression>();
+		if (options_const.value.IsNull() || options_const.value.type().id() != LogicalTypeId::VARCHAR) {
+			return nullptr;
+		}
+		options_str = StringValue::Get(options_const.value) + options_str;
+	}
+
+	// Rebuild the regexp_extract call with the trimmed pattern and updated options
+	vector<unique_ptr<Expression>> extract_children;
+	extract_children.emplace_back(std::move(root.children[0]));
+	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value(trimmed_pattern)));
+	extract_children.emplace_back(std::move(root.children[2]));
 	extract_children.emplace_back(make_uniq<BoundConstantExpression>(Value(std::move(options_str))));
 
 	FunctionBinder binder(rewriter.context);

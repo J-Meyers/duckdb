@@ -1,0 +1,64 @@
+# name: test/sql/optimizer/regex_extract_dotstar_trim.test
+# description: Test that regexp_extract optimizes away trailing .*$
+# group: [optimizer]
+
+statement ok
+PRAGMA enable_verification
+
+statement ok
+CREATE TABLE test_data (s VARCHAR);
+
+statement ok
+INSERT INTO test_data VALUES ('hello world'), ('foo bar'), ('test123');
+
+# Test 1: Basic trailing .*$ should be trimmed
+query I
+SELECT regexp_extract(s, '^(hello).*$', 1) FROM test_data WHERE s LIKE 'hello%';
+----
+hello
+
+# Test 2: Group extraction with trailing .*$
+query I
+SELECT regexp_extract(s, '^(\w+).*$', 1) FROM test_data ORDER BY s;
+----
+foo
+hello
+test123
+
+# Test 3: Verify that trailing newlines are rejected after optimization ($ semantics preserved)
+statement ok
+CREATE TABLE newline_test (s VARCHAR);
+
+statement ok
+INSERT INTO newline_test VALUES ('hello'), ('hello\nworld'), ('foo\n');
+
+# Should only match 'hello' (no trailing newline)
+query I
+SELECT regexp_extract(s, '^(hello).*$', 1) FROM newline_test WHERE regexp_extract(s, '^(hello).*$', 1) = 'hello';
+----
+hello
+
+# Test 4: Multiple groups with trailing .*$
+query I
+SELECT regexp_extract(s, '^(\w+)\s+(\w+).*$', 2) FROM test_data WHERE s LIKE '% %' ORDER BY s;
+----
+bar
+world
+
+# Test 5: Escaped dot should NOT be trimmed: \.*$
+query I
+SELECT regexp_extract('test...', '(test)\\.*$', 1);
+----
+test
+
+# Test 6: Verify optimization doesn't break with 'k' option
+query I
+SELECT regexp_extract('nomatch', '^(hello).*$', 1, 'k');
+----
+nomatch
+
+# Test 7: Test with case-insensitive option
+query I
+SELECT regexp_extract('HELLO world', '^(hello).*$', 1, 'i');
+----
+HELLO

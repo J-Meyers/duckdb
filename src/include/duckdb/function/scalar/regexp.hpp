@@ -19,9 +19,9 @@ namespace regexp_util {
 
 bool TryParseConstantPattern(ClientContext &context, Expression &expr, string &constant_string);
 void ParseRegexOptions(const string &options, duckdb_re2::RE2::Options &result, bool *global_replace = nullptr,
-                       bool *no_match_returns_input = nullptr);
+                       bool *no_match_returns_input = nullptr, bool *reject_trailing_newlines = nullptr);
 void ParseRegexOptions(ClientContext &context, Expression &expr, RE2::Options &target, bool *global_replace = nullptr,
-                       bool *no_match_returns_input = nullptr);
+                       bool *no_match_returns_input = nullptr, bool *reject_trailing_newlines = nullptr);
 void ParseGroupNameList(ClientContext &context, const string &function_name, Expression &group_expr,
                         const string &pattern_string, RE2::Options &options, bool require_constant_pattern,
                         vector<string> &out_names, child_list_t<LogicalType> &out_struct_children);
@@ -47,7 +47,7 @@ struct RegexpBaseBindData : public FunctionData {
 	~RegexpBaseBindData() override;
 
 	duckdb_re2::RE2::Options options;
-	string constant_string;
+	string constant_string;  // Pattern string (may be optimized by removing trailing .*$)
 	bool constant_pattern;
 
 	bool Equals(const FunctionData &other_p) const override;
@@ -105,7 +105,8 @@ struct RegexpReplaceBindData : public RegexpBaseBindData {
 struct RegexpExtractBindData : public RegexpBaseBindData {
 	RegexpExtractBindData();
 	RegexpExtractBindData(duckdb_re2::RE2::Options options, string constant_string, bool constant_pattern,
-	                      int8_t group_index, bool no_match_returns_input = false);
+	                      int8_t group_index, bool no_match_returns_input = false,
+	                      bool reject_trailing_newlines = false);
 
 	// `regexp_extract` always extracts a single capture group. -1 represents "no group requested"
 	// (e.g. NULL group argument), which the runtime treats as a no-match (returns empty/input).
@@ -113,6 +114,9 @@ struct RegexpExtractBindData : public RegexpBaseBindData {
 	// On no match, return the input instead of an empty string (set via the `k` option, also used by
 	// the regexp_replace -> regexp_extract optimizer rewrite).
 	bool no_match_returns_input = false;
+	// Set when the pattern had trailing .*$ that was optimized away by the optimizer.
+	// Runtime must reject matches with trailing newlines to preserve original $ semantics.
+	bool reject_trailing_newlines = false;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other_p) const override;

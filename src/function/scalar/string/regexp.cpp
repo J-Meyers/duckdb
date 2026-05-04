@@ -16,6 +16,8 @@
 #include "re2/stringpiece.h"
 #include "utf8proc_wrapper.hpp"
 
+#include <cstring>
+
 namespace duckdb {
 
 using regexp_util::CreateStringPiece;
@@ -25,7 +27,7 @@ using regexp_util::TryParseConstantPattern;
 // Zero-copy slice of capture group `group_index` from `input`'s buffer; caller must call
 // StringVector::AddHeapReference(result, source) first.
 static inline string_t ExtractCaptureGroup(const string_t &input, const RE2 &re, int8_t group_index,
-                                           bool no_match_returns_input) {
+                                           bool no_match_returns_input, bool reject_trailing_newlines) {
 	if (group_index < 0 || group_index > re.NumberOfCapturingGroups()) {
 		return no_match_returns_input ? input : string_t(nullptr, 0);
 	}
@@ -33,6 +35,16 @@ static inline string_t ExtractCaptureGroup(const string_t &input, const RE2 &re,
 	duckdb_re2::StringPiece submatch[10];
 	const int nsubmatch = group_index + 1;
 	if (re.Match(in_piece, 0, in_piece.size(), duckdb_re2::RE2::UNANCHORED, submatch, nsubmatch)) {
+		if (reject_trailing_newlines) {
+			// When the optimizer trimmed .*$ from the pattern, reject matches with trailing newlines
+			// to preserve the original $ anchor semantics ($ doesn't match before \n by default)
+			const char *match_end = submatch[0].data() + submatch[0].size();
+			const char *input_end = in_piece.data() + in_piece.size();
+			auto remainder = static_cast<size_t>(input_end - match_end);
+			if (std::memchr(match_end, '\n', remainder) != nullptr) {
+				return no_match_returns_input ? input : string_t(nullptr, 0);
+			}
+		}
 		return string_t(submatch[group_index].data(), UnsafeNumericCast<uint32_t>(submatch[group_index].size()));
 	}
 	return no_match_returns_input ? input : string_t(nullptr, 0);
@@ -231,20 +243,21 @@ RegexpExtractBindData::RegexpExtractBindData() {
 }
 
 RegexpExtractBindData::RegexpExtractBindData(duckdb_re2::RE2::Options options, string constant_string_p,
-                                             bool constant_pattern, int8_t group_index, bool no_match_returns_input)
+                                             bool constant_pattern, int8_t group_index, bool no_match_returns_input,
+                                             bool reject_trailing_newlines)
     : RegexpBaseBindData(options, std::move(constant_string_p), constant_pattern), group_index(group_index),
-      no_match_returns_input(no_match_returns_input) {
+      no_match_returns_input(no_match_returns_input), reject_trailing_newlines(reject_trailing_newlines) {
 }
 
 unique_ptr<FunctionData> RegexpExtractBindData::Copy() const {
 	return make_uniq<RegexpExtractBindData>(options, constant_string, constant_pattern, group_index,
-	                                        no_match_returns_input);
+	                                        no_match_returns_input, reject_trailing_newlines);
 }
 
 bool RegexpExtractBindData::Equals(const FunctionData &other_p) const {
 	auto &other = other_p.Cast<RegexpExtractBindData>();
 	return RegexpBaseBindData::Equals(other) && group_index == other.group_index &&
-	       no_match_returns_input == other.no_match_returns_input;
+	       no_match_returns_input == other.no_match_returns_input && reject_trailing_newlines == other.reject_trailing_newlines;
 }
 
 static void RegexExtractFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -262,13 +275,15 @@ static void RegexExtractFunction(DataChunk &args, ExpressionState &state, Vector
 		auto &lstate = ExecuteFunctionState::GetFunctionState(state)->Cast<RegexLocalState>();
 		const auto &re = lstate.constant_pattern;
 		UnaryExecutor::Execute<string_t, string_t>(strings, result, args.size(), [&](string_t input) {
-			return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input);
+			return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input,
+			                           info.reject_trailing_newlines);
 		});
 	} else {
 		BinaryExecutor::Execute<string_t, string_t, string_t>(
 		    strings, patterns, result, args.size(), [&](string_t input, string_t pattern) {
 			    RE2 re(CreateStringPiece(pattern), info.options);
-			    return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input);
+			    return ExtractCaptureGroup(input, re, info.group_index, info.no_match_returns_input,
+			                              info.reject_trailing_newlines);
 		    });
 	}
 }
@@ -363,8 +378,9 @@ static unique_ptr<FunctionData> RegexExtractBind(BindScalarFunctionInput &input)
 	bool constant_pattern = TryParseConstantPattern(context, *arguments[1], constant_string);
 
 	bool no_match_returns_input = false;
+	bool reject_trailing_newlines = false;
 	if (arguments.size() >= 4) {
-		ParseRegexOptions(context, *arguments[3], options, nullptr, &no_match_returns_input);
+		ParseRegexOptions(context, *arguments[3], options, nullptr, &no_match_returns_input, &reject_trailing_newlines);
 	}
 
 	int8_t group_index = 0;
@@ -398,7 +414,7 @@ static unique_ptr<FunctionData> RegexExtractBind(BindScalarFunctionInput &input)
 	}
 
 	return make_uniq<RegexpExtractBindData>(options, std::move(constant_string), constant_pattern, group_index,
-	                                        no_match_returns_input);
+	                                        no_match_returns_input, reject_trailing_newlines);
 }
 
 ScalarFunctionSet RegexpFun::GetFunctions() {

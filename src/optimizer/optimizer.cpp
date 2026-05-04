@@ -69,6 +69,7 @@ Optimizer::Optimizer(Binder &binder, ClientContext &context) : context(context),
 	rewriter.rules.push_back(make_uniq<DistinctWindowedOptimizer>(rewriter));
 	rewriter.rules.push_back(make_uniq<RegexOptimizationRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<RegexpReplaceExtractRule>(rewriter));
+	rewriter.rules.push_back(make_uniq<RegexpExtractOptimizationRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<EmptyNeedleRemovalRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<EnumComparisonRule>(rewriter));
 	rewriter.rules.push_back(make_uniq<JoinDependentFilterRule>(rewriter));

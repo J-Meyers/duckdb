@@ -32,4 +32,12 @@ public:
 	                             bool is_root) override;
 };
 
+class RegexpExtractOptimizationRule : public Rule {
+public:
+	explicit RegexpExtractOptimizationRule(ExpressionRewriter &rewriter);
+
+	unique_ptr<Expression> Apply(LogicalOperator &op, vector<reference<Expression>> &bindings, bool &changes_made,
+	                             bool is_root) override;
+};
+
 } // namespace duckdb

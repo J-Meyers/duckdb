@@ -2,6 +2,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "re2/re2.h"
 #include "re2/stringpiece.h"
+#include "re2/regexp.h"
 
 namespace duckdb {
 
@@ -20,7 +21,7 @@ bool TryParseConstantPattern(ClientContext &context, Expression &expr, string &c
 }
 
 void ParseRegexOptions(const string &options, duckdb_re2::RE2::Options &result, bool *global_replace,
-                       bool *no_match_returns_input) {
+                       bool *no_match_returns_input, bool *reject_trailing_newlines) {
 	for (idx_t i = 0; i < options.size(); i++) {
 		switch (options[i]) {
 		case 'c':
@@ -61,6 +62,14 @@ void ParseRegexOptions(const string &options, duckdb_re2::RE2::Options &result, 
 				throw InvalidInputException("Option 'k' (keep input on no match) is only valid for regexp_extract");
 			}
 			break;
+		case 'T':
+			// internal-only flag: pattern had trailing .*$ trimmed by optimizer
+			if (reject_trailing_newlines) {
+				*reject_trailing_newlines = true;
+			} else {
+				throw InvalidInputException("Option 'T' is internal-only");
+			}
+			break;
 		case ' ':
 		case '\t':
 		case '\n':
@@ -73,7 +82,7 @@ void ParseRegexOptions(const string &options, duckdb_re2::RE2::Options &result, 
 }
 
 void ParseRegexOptions(ClientContext &context, Expression &expr, RE2::Options &target, bool *global_replace,
-                       bool *no_match_returns_input) {
+                       bool *no_match_returns_input, bool *reject_trailing_newlines) {
 	if (expr.HasParameter()) {
 		throw ParameterNotResolvedException();
 	}
@@ -87,7 +96,7 @@ void ParseRegexOptions(ClientContext &context, Expression &expr, RE2::Options &t
 	if (options_str.type().id() != LogicalTypeId::VARCHAR) {
 		throw InvalidInputException("Regex options field must be a string");
 	}
-	ParseRegexOptions(StringValue::Get(options_str), target, global_replace, no_match_returns_input);
+	ParseRegexOptions(StringValue::Get(options_str), target, global_replace, no_match_returns_input, reject_trailing_newlines);
 }
 
 void ParseGroupNameList(ClientContext &context, const string &function_name, Expression &group_expr,

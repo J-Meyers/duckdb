@@ -135,3 +135,40 @@ statement error
 SELECT regexp_replace('foobarbaz', 'b..', 'X', 'k')
 ----
 <REGEX>:.*Option 'k'.*
+
+statement ok
+PRAGMA explain_output='optimized_only';
+
+statement ok
+CREATE TABLE url_test(url VARCHAR);
+
+# Verify trailing .*$ is optimized away and 'T' flag is added
+query II
+EXPLAIN SELECT regexp_extract(url, '^https?://(?:www\.)?([^/]+)/.*$', 1) FROM url_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*T.*
+
+# Verify pattern without trailing .*$ is NOT rewritten (no 'T' flag)
+query II
+EXPLAIN SELECT regexp_extract(url, '^https?://(?:www\.)?([^/]+)/', 1) FROM url_test;
+----
+logical_opt	<!REGEX>:.*'.*T'.*
+
+# Verify escaped \.*$ is NOT optimized (pattern unchanged with .*$)
+query II
+EXPLAIN SELECT regexp_extract(url, '^a(b)\\.*$', 1) FROM url_test;
+----
+logical_opt	<REGEX>:.*\\.*\$.*
+
+# Verify 'T' flag combines with existing options like 'i'
+query II
+EXPLAIN SELECT regexp_extract(url, '^(hello).*$', 1, 'i') FROM url_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*iT.*
+
+# Edge case: Manual 'T' flag prevents optimization (pattern keeps .*$ suffix)
+# Note: 'T' is internal-only and shouldn't be used manually in practice
+query II
+EXPLAIN SELECT regexp_extract(url, '^(a).*$', 1, 'T') FROM url_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*\*\$.*'T'.*

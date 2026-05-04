@@ -189,3 +189,39 @@ query T
 SELECT regexp_replace('héllo-café/rest', '^([^/]+)/.*$', '\1');
 ----
 héllo-café
+
+statement ok
+PRAGMA explain_output='optimized_only';
+
+statement ok
+CREATE TABLE path_test(path VARCHAR);
+
+# Verify anchored pattern with single backreference is rewritten to regexp_extract
+query II
+EXPLAIN SELECT regexp_replace(path, '^/([^/]+)/.*$', '\1') FROM path_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*kT.*
+
+# Verify non-rewritable patterns stay as regexp_replace (multiple backreferences)
+query II
+EXPLAIN SELECT regexp_replace(path, '^(a)(XY)(b)(ZW).*$', '\1\2') FROM path_test;
+----
+logical_opt	<REGEX>:.*regexp_replace.*
+
+# Verify global replace stays as regexp_replace (not rewritten)
+query II
+EXPLAIN SELECT regexp_replace(path, 'ana', 'banana', 'g') FROM path_test;
+----
+logical_opt	<REGEX>:.*regexp_replace.*
+
+# Verify escaped \.*$ pattern still gets rewritten (but not trimmed)
+query II
+EXPLAIN SELECT regexp_replace(path, '^a(b)\\.*$', '\1') FROM path_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*k.*
+
+# Verify options are preserved during rewrite (i + k + T)
+query II
+EXPLAIN SELECT regexp_replace(path, '^(hello).*$', '\1', 'i') FROM path_test;
+----
+logical_opt	<REGEX>:.*regexp_extract.*ikT.*
