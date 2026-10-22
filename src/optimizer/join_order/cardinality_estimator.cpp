@@ -121,11 +121,13 @@ public:
 
 struct Subgraph2Denominator {
 public:
-	Subgraph2Denominator() : relations(nullptr), numerator_relations(nullptr), denom(1) {
+	Subgraph2Denominator() : relations(nullptr), semantic_relations(nullptr), numerator_relations(nullptr), denom(1) {
 	}
 
 public:
 	optional_ptr<JoinRelationSet> relations;
+	// Semantic membership does not imply that every relation has been costed.
+	optional_ptr<JoinRelationSet> semantic_relations;
 	optional_ptr<JoinRelationSet> numerator_relations;
 	double denom;
 };
@@ -368,15 +370,26 @@ vector<FilterInfoWithTotalDomains> GetEdges(vector<RelationsSetToStats> &relatio
 static optional_ptr<JoinRelationSet> GetEdgeEndpoint(FilterInfoWithTotalDomains &edge,
                                                      JoinRelationSetManager &set_manager, bool left) {
 	auto &filter = edge.GetFilter();
-	// LEFT edges must include all preserved relations referenced by their conditions.
-	if (filter.join_type != JoinType::LEFT && filter.filter &&
-	    BoundComparisonExpression::IsComparison(*filter.filter)) {
+	if (filter.filter && BoundComparisonExpression::IsComparison(*filter.filter)) {
 		auto &binding = edge.GetPredicate().GetStatsBinding(left);
 		if (binding.table_index.IsValid()) {
 			return &set_manager.GetJoinRelation(RelationIndex(binding.table_index.index));
 		}
 	}
 	return left ? edge.GetPredicate().GetLeftSetOptional() : edge.GetPredicate().GetRightSetOptional();
+}
+
+static JoinRelationSet &GetSemanticEndpoint(FilterInfoWithTotalDomains &edge, JoinRelationSet &endpoint) {
+	auto &predicate = edge.GetPredicate();
+	if (predicate.GetJoinType() == JoinType::LEFT) {
+		if (JoinRelationSet::IsSubset(predicate.GetLeftSet(), endpoint)) {
+			return predicate.GetLeftSet();
+		}
+		if (JoinRelationSet::IsSubset(predicate.GetRightSet(), endpoint)) {
+			return predicate.GetRightSet();
+		}
+	}
+	return endpoint;
 }
 
 bool EdgeConnects(FilterInfoWithTotalDomains &edge, Subgraph2Denominator &subgraph,
@@ -482,8 +495,8 @@ LeftJoinDenomInfo CardinalityEstimator::CalculateLeftJoinDenomInfo(Subgraph2Deno
 	auto &predicate = filter.GetPredicate();
 	D_ASSERT(left.relations && right.relations);
 	D_ASSERT(left.numerator_relations && right.numerator_relations);
-	auto left_is_preserved = JoinRelationSet::IsSubset(*left.relations, predicate.GetLeftSet()) &&
-	                         JoinRelationSet::IsSubset(*right.relations, predicate.GetRightSet());
+	auto left_is_preserved = JoinRelationSet::IsSubset(*left.semantic_relations, predicate.GetLeftSet()) &&
+	                         JoinRelationSet::IsSubset(*right.semantic_relations, predicate.GetRightSet());
 	auto &preserved_numerator = left_is_preserved ? *left.numerator_relations : *right.numerator_relations;
 	auto preserved_denom = GetEffectiveDenom(left_is_preserved ? left.denom : right.denom);
 
@@ -721,6 +734,7 @@ struct DenominatorState {
 	reference_map_t<JoinRelationSet, CompositeJoinPairStats> join_pair_stats;
 	reference_set_t<JoinRelationSet> capped_join_pairs;
 	unordered_set<idx_t> unused_edge_tdoms;
+	unordered_set<idx_t> applied_left_joins;
 };
 
 static bool DenominatorSubgraphComplete(DenominatorState &state, JoinRelationSet &set) {
@@ -731,6 +745,11 @@ static bool DenominatorSubgraphComplete(DenominatorState &state, JoinRelationSet
 void CardinalityEstimator::ProcessDenominatorEdge(FilterInfoWithTotalDomains &edge, JoinRelationSet &requested_set,
                                                   DenominatorState &state) {
 	auto edge_kind = ClassifyDenominatorEdge(edge, state.applied_equivalence_groups);
+	auto source_operator = edge.GetFilter().source_operator_index;
+	if (edge_kind == DenominatorEdgeKind::LEFT_JOIN && source_operator.IsValid() &&
+	    !state.applied_left_joins.insert(source_operator.GetIndex()).second) {
+		return;
+	}
 	if (DenominatorSubgraphComplete(state, requested_set)) {
 		auto &complete_subgraph = state.subgraphs.at(0);
 		ApplyCompositeJoinPairCaps(complete_subgraph.denom, *complete_subgraph.relations, state.join_pair_stats,
@@ -777,13 +796,17 @@ void CardinalityEstimator::CreateDenominatorSubgraph(FilterInfoWithTotalDomains 
 	auto left_subgraph = Subgraph2Denominator();
 	auto right_subgraph = Subgraph2Denominator();
 	left_subgraph.relations = &edge_left_set;
-	left_subgraph.numerator_relations = &edge_left_set;
+	left_subgraph.semantic_relations = &GetSemanticEndpoint(edge, edge_left_set);
+	left_subgraph.numerator_relations = left_subgraph.semantic_relations;
 	right_subgraph.relations = &edge_right_set;
-	right_subgraph.numerator_relations = &edge_right_set;
+	right_subgraph.semantic_relations = &GetSemanticEndpoint(edge, edge_right_set);
+	right_subgraph.numerator_relations = right_subgraph.semantic_relations;
 	auto &numerator_relations = UpdateNumeratorRelations(left_subgraph, right_subgraph, edge);
 	auto denom = CalculateUpdatedDenom(left_subgraph, right_subgraph, edge);
 	left_subgraph.numerator_relations = &numerator_relations;
 	left_subgraph.relations = &set_manager.Union(edge_left_set, edge_right_set);
+	left_subgraph.semantic_relations =
+	    &set_manager.Union(*left_subgraph.semantic_relations, *right_subgraph.semantic_relations);
 	left_subgraph.denom = denom;
 	ApplyCompositeJoinPairCaps(left_subgraph.denom, *left_subgraph.relations, state.join_pair_stats,
 	                           state.capped_join_pairs);
@@ -796,10 +819,12 @@ void CardinalityEstimator::ExtendDenominatorSubgraph(idx_t subgraph_index, Filte
 	auto left_subgraph = &state.subgraphs.at(subgraph_index);
 	auto right_subgraph = Subgraph2Denominator();
 	right_subgraph.relations = &edge_right_set;
-	right_subgraph.numerator_relations = &edge_right_set;
+	right_subgraph.semantic_relations = &GetSemanticEndpoint(edge, edge_right_set);
+	right_subgraph.numerator_relations = right_subgraph.semantic_relations;
 	if (JoinRelationSet::IsSubset(*left_subgraph->relations, *right_subgraph.relations)) {
 		right_subgraph.relations = &edge_left_set;
-		right_subgraph.numerator_relations = &edge_left_set;
+		right_subgraph.semantic_relations = &GetSemanticEndpoint(edge, edge_left_set);
+		right_subgraph.numerator_relations = right_subgraph.semantic_relations;
 	}
 
 	if (JoinRelationSet::IsSubset(*left_subgraph->relations, edge_left_set) &&
@@ -817,6 +842,8 @@ void CardinalityEstimator::ExtendDenominatorSubgraph(idx_t subgraph_index, Filte
 	auto denom = CalculateUpdatedDenom(*left_subgraph, right_subgraph, edge);
 	left_subgraph->numerator_relations = &numerator_relations;
 	left_subgraph->relations = &set_manager.Union(*left_subgraph->relations, *right_subgraph.relations);
+	left_subgraph->semantic_relations =
+	    &set_manager.Union(*left_subgraph->semantic_relations, *right_subgraph.semantic_relations);
 	left_subgraph->denom = denom;
 	ApplyCompositeJoinPairCaps(left_subgraph->denom, *left_subgraph->relations, state.join_pair_stats,
 	                           state.capped_join_pairs);
@@ -832,6 +859,8 @@ void CardinalityEstimator::MergeDenominatorSubgraphs(const vector<idx_t> &subgra
 	auto denom = CalculateUpdatedDenom(*subgraph_to_merge_into, *subgraph_to_delete, edge);
 	subgraph_to_merge_into->relations =
 	    &set_manager.Union(*subgraph_to_merge_into->relations, *subgraph_to_delete->relations);
+	subgraph_to_merge_into->semantic_relations =
+	    &set_manager.Union(*subgraph_to_merge_into->semantic_relations, *subgraph_to_delete->semantic_relations);
 	subgraph_to_merge_into->numerator_relations = &numerator_relations;
 	subgraph_to_merge_into->denom = denom;
 	ApplyCompositeJoinPairCaps(subgraph_to_merge_into->denom, *subgraph_to_merge_into->relations, state.join_pair_stats,

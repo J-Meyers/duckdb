@@ -1,0 +1,25 @@
+# name: test/optimizer/joins/left_join_reordering/left_join_preserved_side_selectivity.test
+# description: Preserve INNER join selectivity below a LEFT join
+# group: [left_join_reordering]
+
+statement ok
+CREATE TABLE p AS SELECT i::BIGINT AS ts, (i % 16)::INT AS pid FROM range(512) t(i);
+
+statement ok
+CREATE TABLE c AS SELECT i::INT AS pid, 0::BIGINT AS lo, 256::BIGINT AS hi FROM range(16) t(i);
+
+statement ok
+CREATE TABLE b AS SELECT (i % 16)::INT AS pid, i::BIGINT AS vf, (i + 8)::BIGINT AS vt FROM range(512) t(i);
+
+query I
+SELECT count(*) FROM p JOIN c ON p.pid = c.pid AND p.ts >= c.lo AND p.ts < c.hi
+LEFT JOIN b ON p.ts >= b.vf AND c.pid = b.pid AND p.ts < b.vt;
+----
+256
+
+# The LEFT join must not erase the preceding INNER join's range selectivity.
+query II
+EXPLAIN SELECT count(*) FROM p JOIN c ON p.pid = c.pid AND p.ts >= c.lo AND p.ts < c.hi
+LEFT JOIN b ON p.ts >= b.vf AND c.pid = b.pid AND p.ts < b.vt;
+----
+physical_plan	<REGEX>:.*(LEFT|RIGHT)[^~]*~341 rows.*

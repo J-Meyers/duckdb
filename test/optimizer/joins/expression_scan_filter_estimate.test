@@ -1,0 +1,24 @@
+# name: test/optimizer/joins/expression_scan_filter_estimate.test
+# description: Expression equality filters must not use the base column's distinct count
+# group: [joins]
+
+statement ok
+CREATE TABLE input AS SELECT i AS id FROM range(100) r(i);
+
+statement ok
+PRAGMA explain_output='optimized_only';
+
+query II
+EXPLAIN (FORMAT JSON) SELECT * FROM input WHERE id % 7 = 0;
+----
+logical_opt	<REGEX>:.*"Estimated Cardinality":\s*"20".*
+
+query II
+EXPLAIN (FORMAT JSON) SELECT * FROM input WHERE id = 7;
+----
+logical_opt	<REGEX>:.*"Estimated Cardinality":\s*"2".*
+
+query I
+SELECT count(*) FROM input WHERE id % 7 = 0;
+----
+15
