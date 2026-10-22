@@ -368,7 +368,9 @@ vector<FilterInfoWithTotalDomains> GetEdges(vector<RelationsSetToStats> &relatio
 static optional_ptr<JoinRelationSet> GetEdgeEndpoint(FilterInfoWithTotalDomains &edge,
                                                      JoinRelationSetManager &set_manager, bool left) {
 	auto &filter = edge.GetFilter();
-	if (filter.filter && BoundComparisonExpression::IsComparison(*filter.filter)) {
+	// LEFT edges must include all preserved relations referenced by their conditions.
+	if (filter.join_type != JoinType::LEFT && filter.filter &&
+	    BoundComparisonExpression::IsComparison(*filter.filter)) {
 		auto &binding = edge.GetPredicate().GetStatsBinding(left);
 		if (binding.table_index.IsValid()) {
 			return &set_manager.GetJoinRelation(RelationIndex(binding.table_index.index));

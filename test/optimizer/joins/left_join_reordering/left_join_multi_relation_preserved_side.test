@@ -1,0 +1,69 @@
+# name: test/optimizer/joins/left_join_reordering/left_join_multi_relation_preserved_side.test
+# description: LEFT join condition referencing two preserved relations
+# group: [left_join_reordering]
+
+statement ok
+CREATE TABLE p AS SELECT (i % 4)::INT AS pid, i::BIGINT AS ts FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE c AS SELECT i::INT AS pid, (i % 2 = 0) AS flag FROM range(4) t(i);
+
+statement ok
+CREATE TABLE b AS SELECT (i % 4)::INT AS pid, (i * 125)::BIGINT AS vf FROM range(8) t(i);
+
+statement ok
+CREATE TABLE k AS SELECT (i % 4)::INT AS pid, (i * 10)::BIGINT AS q FROM range(100) t(i);
+
+query II
+EXPLAIN SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.flag;
+----
+physical_plan	<REGEX>:.*LEFT[^~]*~[1-9][0-9]{0,2}(,[0-9]{3})+ rows.*
+
+query II
+EXPLAIN SELECT count(*) FROM p
+JOIN c ON p.pid = c.pid
+LEFT JOIN b ON p.ts >= b.vf AND c.flag
+LEFT JOIN k ON p.pid = k.pid AND p.ts >= k.q AND p.ts < k.q + 10;
+----
+physical_plan	<!REGEX>:.*RIGHT.*
+
+# Conditions can reference different preserved relations.
+query II
+EXPLAIN SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.pid = b.pid;
+----
+physical_plan	<REGEX>:.*LEFT[^~]*~[1-9][0-9]{0,2}(,[0-9]{3})+ rows.*
+
+query II
+EXPLAIN SELECT count(*) FROM p
+JOIN c ON p.pid = c.pid
+LEFT JOIN b ON b.vf <= p.ts AND b.pid = c.pid
+LEFT JOIN k ON p.pid = k.pid AND p.ts >= k.q AND p.ts < k.q + 10;
+----
+physical_plan	<!REGEX>:.*RIGHT.*
+
+query I
+SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.flag;
+----
+2748
+
+query I
+SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.pid = b.pid;
+----
+1314
+
+query II
+EXPLAIN SELECT count(*) FROM b RIGHT JOIN (p JOIN c ON p.pid = c.pid) ON p.ts >= b.vf AND c.pid = b.pid;
+----
+physical_plan	<REGEX>:.*(LEFT|RIGHT)[^~]*~[1-9][0-9]{0,2}(,[0-9]{3})+ rows.*
+
+query II
+EXPLAIN SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.pid IS NOT DISTINCT FROM b.pid;
+----
+physical_plan	<REGEX>:.*LEFT[^~]*~[1-9][0-9]{0,2}(,[0-9]{3})+ rows.*
+
+# Post-join filters may reduce the estimate below the preserved input.
+query II
+EXPLAIN SELECT count(*) FROM p JOIN c ON p.pid = c.pid LEFT JOIN b ON p.ts >= b.vf AND c.pid = b.pid
+WHERE b.pid IS NULL OR c.pid = 2;
+----
+physical_plan	<REGEX>:.*LEFT[^~]*~[1-9][0-9]{0,2} rows.*
